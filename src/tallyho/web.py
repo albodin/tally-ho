@@ -22,6 +22,8 @@ Design notes:
   first-run setup wizard (:mod:`tallyho.setup`).
 """
 
+import hashlib
+import json
 import logging
 import math
 import os
@@ -102,7 +104,7 @@ def create_app(cfg: Config, store: Store, ntfy_sink=None):
     ``/api/test-ntfy`` route can be exercised without real network I/O; when
     ``None`` it lazily builds an :class:`~tallyho.notify.HttpNtfySink`."""
     try:
-        from fastapi import FastAPI, HTTPException, Request
+        from fastapi import FastAPI, HTTPException, Request, Response
         from fastapi.responses import FileResponse, JSONResponse
         from pydantic import BaseModel, ConfigDict, Field
         from starlette.middleware.sessions import SessionMiddleware
@@ -239,11 +241,16 @@ def create_app(cfg: Config, store: Store, ntfy_sink=None):
         return out
 
     @app.get("/api/flights/{serial}/{launch_day}/history")
-    def flight_history(serial: str, launch_day: date):
+    def flight_history(serial: str, launch_day: date, request: Request):
         """One flight's full prediction time-series, each scored against a
         reference point: the recorded actual landing once the flight is down,
         else the *latest* prediction (drift - how far the predicted landing has
-        moved). The dashboard's per-sonde history panel reads this."""
+        moved). The dashboard's per-sonde history panel reads this.
+
+        ETag'd: this is the page's heaviest response (a LANDED flight ships its
+        whole flown track) and the dashboard re-polls it every 15 s while the
+        panel is open, so unchanged data revalidates as a bodyless 304 instead
+        of re-downloading."""
         flight = store.get_flight(serial, launch_day)
         if flight is None:
             raise HTTPException(status_code=404, detail="flight not found")
@@ -273,7 +280,7 @@ def create_app(cfg: Config, store: Store, ntfy_sink=None):
         track = ([[t["lat"], t["lon"], t["alt"]]
                   for t in store.track_for(serial, launch_day)]
                  if flight["state"] == "LANDED" else [])
-        return {
+        payload = {
             "serial": serial,
             "launch_day": launch_day.isoformat(),
             "flight": flight,
@@ -282,6 +289,15 @@ def create_app(cfg: Config, store: Store, ntfy_sink=None):
             "track": track,
             "predictions": out_preds,
         }
+        # Serialize once so the ETag is a hash of the exact bytes served
+        body = json.dumps(payload, ensure_ascii=False, allow_nan=False,
+                          separators=(",", ":"))
+        etag = f'"{hashlib.sha256(body.encode()).hexdigest()[:32]}"'
+        headers = {"ETag": etag, "Cache-Control": "private, no-cache"}
+        if request.headers.get("if-none-match") == etag:
+            return Response(status_code=304, headers=headers)
+        return Response(content=body, media_type="application/json",
+                        headers=headers)
 
     @app.get("/api/alerts")
     def alerts(limit: int = 100):

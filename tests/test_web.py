@@ -555,3 +555,32 @@ def test_history_flight_without_predictions(client):
     assert body["predictions"] == []
     assert body["distance_reference"] is None
     assert body["landing"] is None
+
+
+def test_history_etag_lets_unchanged_polls_revalidate(client):
+    """The dashboard re-polls an open history panel every 15 s; unchanged data
+    must come back as a bodyless 304, and any change must invalidate the ETag."""
+    store = client.store
+    day = date(2026, 6, 7)
+    store.upsert_flight({"serial": "E1", "launch_day": day.isoformat(),
+                         "state": "DESCENT", "type": "RS41"})
+    _save_pred(store, "E1", day, 10, 45.9, 7.6, alt=9000.0)
+
+    r1 = client.get("/api/flights/E1/2026-06-07/history")
+    assert r1.status_code == 200
+    etag = r1.headers["etag"]
+    # no-cache = cache-but-revalidate, so the browser polls with If-None-Match
+    assert r1.headers["cache-control"] == "private, no-cache"
+
+    r2 = client.get("/api/flights/E1/2026-06-07/history",
+                    headers={"If-None-Match": etag})
+    assert r2.status_code == 304
+    assert r2.content == b""
+
+    # a new prediction changes the payload → full 200 under a new ETag
+    _save_pred(store, "E1", day, 20, 45.5, 7.7, alt=5000.0)
+    r3 = client.get("/api/flights/E1/2026-06-07/history",
+                    headers={"If-None-Match": etag})
+    assert r3.status_code == 200
+    assert r3.headers["etag"] != etag
+    assert len(r3.json()["predictions"]) == 2

@@ -476,6 +476,10 @@
   // current latest prediction (drift) - the backend picks and reports which.
   let historyKey = null;          // { serial, day } while the panel is open
   let lastHistJson = "";
+  // A LANDED flight with its landing recorded can't gain predictions or move -
+  // once we've rendered it, stop re-fetching on the 15 s poll (reopening the
+  // panel fetches fresh). Active flights keep polling: their history grows.
+  let histFinal = false;
   const histDistLabel = (ref) => ref === "landing"
     ? "error vs actual landing" : "drift vs latest prediction";
 
@@ -610,7 +614,7 @@
   }
 
   async function refreshHistory(fit) {
-    if (!historyKey) return;
+    if (!historyKey || histFinal) return;
     let d;
     try {
       d = await api(`/api/flights/${encodeURIComponent(historyKey.serial)}/${encodeURIComponent(historyKey.day)}/history`);
@@ -618,6 +622,7 @@
       closeHistory();   // flight gone (history cleared / restart) - fold quietly
       return;
     }
+    histFinal = d.flight.state === "LANDED" && !!d.landing;
     const j = JSON.stringify(d);
     // unchanged data: skip the rebuild so open popups survive (same trick as the map)
     if (!fit && j === lastHistJson) return;
@@ -628,13 +633,13 @@
   }
   async function openHistory(serial, day) {
     historyKey = { serial, day };
-    lastHistJson = "";
+    lastHistJson = ""; histFinal = false;
     $("history-section").style.display = "";
     await refreshHistory(true);
     if (historyKey) $("history-section").scrollIntoView({ behavior:"smooth", block:"start" });
   }
   function closeHistory() {
-    historyKey = null; lastHistJson = "";
+    historyKey = null; lastHistJson = ""; histFinal = false;
     $("history-section").style.display = "none";
     historyLayer.clearLayers();
   }
