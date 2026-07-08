@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=83", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "windfall"
+version = "0.1.0"
+description = "Radiosonde descent/landing predictor with an offline accuracy & ablation harness"
+readme = "README.md"
+requires-python = ">=3.14"
+license = { text = "AGPL-3.0-or-later" }
+authors = [{ name = "tally-ho" }]
+dependencies = [
+    "numpy>=2.5.1",
+]
+
+# Heavy / optional I/O dependencies. The core engine (parsing, kinematics,
+# profiles, descent fit, integrator, ensemble, replay harness) runs WITHOUT
+# these, so the full test suite is offline-capable.
+[project.optional-dependencies]
+dem = ["rasterio>=1.5.0"]          # Copernicus GLO-30 terrain termination
+gfs = ["herbie-data>=2026.3.0", "cfgrib>=0.9.15.1", "xarray>=2026.4.0"]  # GFS wind fields
+archive = ["sondehub>=0.3.2"]      # `windfall replay --serial` archive download
+dev = ["pytest>=9.1.1", "pytest-cov>=7.1.0"]
+
+[project.scripts]
+windfall = "windfall.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = ["error::DeprecationWarning:windfall.*"]

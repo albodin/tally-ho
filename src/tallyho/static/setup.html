@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>tally-ho - first-run setup</title>
+  <style>
+    :root { --bg:#0f1419; --panel:#1a212b; --line:#2b3543; --fg:#dbe4ee; --muted:#8b9bb0;
+            --accent:#4ea1ff; --ok:#7bd88f; --bad:#ff6b6b; }
+    * { box-sizing: border-box; }
+    body { margin:0; font:14px/1.45 system-ui,sans-serif; background:var(--bg); color:var(--fg);
+           min-height:100vh; display:flex; align-items:center; justify-content:center; padding:24px 0; }
+    form { background:var(--panel); border:1px solid var(--line); border-radius:10px;
+           padding:26px 28px; width:min(440px, 92vw); display:flex; flex-direction:column; gap:12px; }
+    h1 { font-size:20px; margin:0; }
+    p.lead { margin:0 0 6px; color:var(--muted); font-size:13px; }
+    h2 { font-size:12px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted);
+         border-bottom:1px solid var(--line); padding-bottom:5px; margin:10px 0 0; }
+    label { display:flex; flex-direction:column; gap:4px; font-size:12px; color:var(--muted); }
+    label.check { flex-direction:row; align-items:baseline; gap:8px; font-size:13px; color:var(--fg); }
+    label.check .sub { color:var(--muted); font-size:12px; }
+    input[type=text], input[type=password], input[type=number] {
+      background:#0d1218; border:1px solid var(--line); color:var(--fg);
+      border-radius:6px; padding:8px 9px; font:inherit; }
+    button { background:var(--accent); color:#04121f; border:0; border-radius:6px;
+             padding:9px 14px; font:inherit; font-weight:600; cursor:pointer; margin-top:8px; }
+    button:disabled { opacity:.45; cursor:not-allowed; }
+    #msg { display:none; padding:8px 10px; border-radius:6px; font-size:13px;
+           background:#3a2226; color:var(--bad); border:1px solid #5a2f33; }
+    #msg.ok { background:#1d3326; color:var(--ok); border-color:#2f5a3c; }
+    .keep { margin-left:26px; }
+  </style>
+</head>
+<body>
+  <form id="f">
+    <h1>🎈 tally-ho setup</h1>
+    <p class="lead">Create your account and pick the data sources. Everything else
+      can be tuned later in <code>config.toml</code> in the data directory.</p>
+    <div id="msg"></div>
+
+    <h2>Account</h2>
+    <label>Username
+      <input type="text" id="username" autocomplete="username" required autofocus />
+    </label>
+    <label>Password <span class="sub">(at least 8 characters)</span>
+      <input type="password" id="password" autocomplete="new-password" minlength="8" required />
+    </label>
+    <label>Confirm password
+      <input type="password" id="confirm" autocomplete="new-password" minlength="8" required />
+    </label>
+
+    <h2>Data sources</h2>
+    <label class="check">
+      <input type="checkbox" id="gfs" checked />
+      <span>GFS winds <span class="sub">- global model; fallback wind source for
+        sondes caught mid-descent (recommended)</span></span>
+    </label>
+    <label class="keep">Prune GFS cache after (hours, 0 = keep everything)
+      <input type="number" id="keep" value="48" min="0" step="1" />
+    </label>
+    <label class="check">
+      <input type="checkbox" id="hrrr" />
+      <span>HRRR winds <span class="sub">- NOAA 3&nbsp;km model, much better
+        low-altitude winds, US (CONUS) only</span></span>
+    </label>
+    <label class="check">
+      <input type="checkbox" id="dem" checked />
+      <span>Terrain (DEM) <span class="sub">- auto-download elevation tiles so
+        descents terminate on real ground, not sea level (recommended)</span></span>
+    </label>
+
+    <button id="go" type="submit">Finish setup</button>
+  </form>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const msg = (text, ok) => {
+      const el = $("msg");
+      el.textContent = text;
+      el.className = ok ? "ok" : "";
+      el.style.display = "block";
+    };
+
+    // After the wizard finishes, the setup server hands over to the real app on
+    // the same port - poll until it's up, then go to the dashboard (the wizard
+    // already signed us in).
+    async function waitForApp() {
+      for (let i = 0; i < 90; i++) {
+        await new Promise((r) => setTimeout(r, 1500));
+        try {
+          const h = await (await fetch("/api/health")).json();
+          if (h.status !== "setup") { location.href = "/"; return; }
+        } catch {}
+      }
+      msg("The app didn't come back up - check the container logs.", false);
+    }
+
+    $("f").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      if ($("password").value !== $("confirm").value) {
+        msg("Passwords don't match.", false);
+        return;
+      }
+      $("go").disabled = true;
+      try {
+        const r = await fetch("/api/setup", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            username: $("username").value.trim(),
+            password: $("password").value,
+            gfs_enabled: $("gfs").checked,
+            hrrr_enabled: $("hrrr").checked,
+            dem_enabled: $("dem").checked,
+            gfs_keep_hours: Math.max(0, parseFloat($("keep").value) || 0),
+          }),
+        });
+        if (r.ok) {
+          msg("Setup complete - starting the app…", true);
+          waitForApp();
+          return;
+        }
+        let detail = r.statusText;
+        try { const j = await r.json(); detail = JSON.stringify(j.detail || j); } catch {}
+        msg(detail, false);
+      } catch (err) {
+        msg("server unreachable - " + err.message, false);
+      }
+      $("go").disabled = false;
+    });
+  </script>
+</body>
+</html>

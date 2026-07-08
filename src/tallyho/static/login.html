@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>tally-ho - sign in</title>
+  <style>
+    :root { --bg:#0f1419; --panel:#1a212b; --line:#2b3543; --fg:#dbe4ee; --muted:#8b9bb0;
+            --accent:#4ea1ff; --bad:#ff6b6b; }
+    * { box-sizing: border-box; }
+    body { margin:0; font:14px/1.45 system-ui,sans-serif; background:var(--bg); color:var(--fg);
+           min-height:100vh; display:flex; align-items:center; justify-content:center; }
+    form { background:var(--panel); border:1px solid var(--line); border-radius:10px;
+           padding:26px 28px; width:min(340px, 92vw); display:flex; flex-direction:column; gap:12px; }
+    h1 { font-size:20px; margin:0 0 6px; }
+    label { display:flex; flex-direction:column; gap:4px; font-size:12px; color:var(--muted); }
+    input { background:#0d1218; border:1px solid var(--line); color:var(--fg);
+            border-radius:6px; padding:8px 9px; font:inherit; }
+    button { background:var(--accent); color:#04121f; border:0; border-radius:6px;
+             padding:9px 14px; font:inherit; font-weight:600; cursor:pointer; margin-top:4px; }
+    button:disabled { opacity:.45; cursor:not-allowed; }
+    #err { display:none; padding:8px 10px; border-radius:6px; font-size:13px;
+           background:#3a2226; color:var(--bad); border:1px solid #5a2f33; }
+  </style>
+</head>
+<body>
+  <form id="f">
+    <h1>🎈 tally-ho</h1>
+    <div id="err"></div>
+    <label>Username
+      <input id="username" autocomplete="username" required autofocus />
+    </label>
+    <label>Password
+      <input id="password" type="password" autocomplete="current-password" required />
+    </label>
+    <button id="go" type="submit">Sign in</button>
+  </form>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    $("f").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      $("go").disabled = true;
+      $("err").style.display = "none";
+      try {
+        const r = await fetch("/api/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username: $("username").value.trim(),
+                                 password: $("password").value }),
+        });
+        if (r.ok) { location.href = "/"; return; }
+        let detail = r.statusText;
+        try { detail = (await r.json()).detail || detail; } catch {}
+        $("err").textContent = detail;
+        $("err").style.display = "block";
+      } catch (err) {
+        $("err").textContent = "server unreachable - " + err.message;
+        $("err").style.display = "block";
+      }
+      $("go").disabled = false;
+    });
+  </script>
+</body>
+</html>

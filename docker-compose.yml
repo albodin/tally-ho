@@ -1,0 +1,47 @@
+services:
+  tallyho:
+    # Builds locally by default. To run the CI-published image instead, set
+    # TALLYHO_IMAGE=ghcr.io/albodin/tally-ho:latest in .env and `docker compose pull`.
+    image: ${TALLYHO_IMAGE:-tally-ho:local}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    # Defaults to the image's tallyho user (10001). Override in .env, e.g.
+    # PUID=$(id -u) PGID=$(id -g) so the bind-mounts below are writable.
+    user: "${PUID:-10001}:${PGID:-10001}"
+    volumes:
+      # Host bind-mounts; each dir must be owned by the uid:gid above (Docker
+      # won't chown them). Paths overridable in .env.
+      # ':z' relabels the mount for SELinux (required on this Fedora host;
+      # ignored as a no-op on non-SELinux hosts like Unraid, so it's portable).
+      - ${TALLYHO_DATA_DIR:-./data}:/data:z    # SQLite DB + heartbeat
+      - ${TALLYHO_GFS_DIR:-./gfs}:/gfs:z        # GFS wind cache
+      - ${TALLYHO_HRRR_DIR:-./hrrr}:/hrrr:z     # HRRR wind cache (CONUS only)
+      - ${TALLYHO_DEM_DIR:-./dem}:/dem:z        # Copernicus GLO-30 tiles (auto-downloaded)
+    environment:
+      # Everything else is configured in ./data/config.toml - seeded on first
+      # run; the setup wizard at http://<host>:8080 writes its choices there.
+      # A PUID with no passwd entry in the image resolves HOME to "/", which
+      # herbie can't write its config to; point it somewhere writable.
+      HOME: /tmp
+      # Timezone for human-facing times (dashboard clock + ntfy ETAs). Any IANA
+      # name, e.g. America/New_York; set TZ in .env. tzdata ships in the image,
+      # so named zones resolve without installing anything.
+      TZ: ${TZ:-America/Los_Angeles}
+      TALLYHO_LOG_LEVEL: INFO
+    ports:
+      # Dashboard; login required (account created by the first-run wizard).
+      # Sessions travel plain HTTP - fine on a LAN, put a TLS reverse proxy in
+      # front for anything wider. Host port overridable in .env.
+      - "${TALLYHO_PORT:-8080}:8080"
+    env_file:
+      # ntfy bearer tokens, referenced by name from the DB (e.g. NTFY_ALICE=tk_xxx).
+      - path: ./secrets.env
+        required: false
+    healthcheck:
+      test: ["CMD", "tallyho", "health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 3

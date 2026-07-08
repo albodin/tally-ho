@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=83", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tallyho"
+version = "0.1.0"
+description = "Self-hosted SondeHub radiosonde landing predictor with ntfy alerts"
+readme = "README.md"
+requires-python = ">=3.14"
+license = { text = "AGPL-3.0-or-later" }
+authors = [{ name = "tally-ho" }]
+# The prediction engine is the standalone `windfall` package (predictor/ in
+# this repo). Not on PyPI - install it first: pip install -e ./predictor
+dependencies = [
+    "numpy>=2.5.1",
+    "windfall",
+]
+
+# Heavy / optional I/O dependencies. The core (geofence, alerts, store, and the
+# whole windfall engine) runs WITHOUT these so the full test suite is
+# offline-capable. dem/gfs pass through to the engine.
+[project.optional-dependencies]
+ingest = ["sondehub>=0.3.2"]      # live MQTT telemetry stream (PyPI tops out at 0.3.x)
+dem = ["windfall[dem]"]          # Copernicus GLO-30 terrain termination
+gfs = ["windfall[gfs]"]          # GFS wind fields
+# dashboard + onboarding UI; itsdangerous signs the session cookie, tomlkit
+# lets the setup wizard write config.toml without clobbering its comments
+api = ["fastapi>=0.139.0", "uvicorn>=0.50.2", "itsdangerous>=2.2.0", "tomlkit>=0.15.0"]
+dev = ["pytest>=9.1.1", "pytest-cov>=7.1.0", "httpx2>=2.5.0"]  # httpx2: FastAPI TestClient
+
+[project.scripts]
+tallyho = "tallyho.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+# Ship the web UI pages and the config template inside the wheel so `tallyho`
+# can serve/seed them from an installed environment (not just a source checkout).
+tallyho = ["static/*.html", "config.example.toml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = ["error::DeprecationWarning:tallyho.*"]

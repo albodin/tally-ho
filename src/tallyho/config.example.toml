@@ -1,0 +1,204 @@
+# tally-ho configuration.
+#
+# tally-ho seeds this file into its data directory on first run (Docker:
+# /data/config.toml, bare metal: data/config.toml). Every setting is shown
+# commented out at its built-in default - uncomment a line to change it, then
+# restart the app to apply. The first-run setup wizard appends its choices as
+# active lines inside the matching sections.
+#
+# Any value can also be overridden by an env var TALLYHO_<SECTION>_<KEY>
+# (e.g. TALLYHO_INTEGRATOR_DT_SECONDS=2), or TALLYHO_<KEY> for top-level keys;
+# env overrides beat this file. The Docker image uses that for the fixed
+# in-container paths (/data, /gfs, /hrrr, /dem) and the container bind address.
+# Secrets (ntfy tokens) are NEVER stored here - see [notify] / README.
+
+# db_path = "data/tallyho.db"
+# log_level = "INFO"
+# health_file = "data/heartbeat"
+# health_stale_seconds = 120.0      # pipeline is unhealthy if no frame within this window
+# tick_seconds = 15.0               # maintenance cadence (landed-by-timeout, heartbeat)
+# subscriber_reload_seconds = 300.0 # re-read subscribers/ROI from the DB
+# IANA timezone for human-facing times (dashboard clock + ntfy ETAs). Empty
+# means "auto": honor the TZ env var (how docker-compose passes it), else UTC.
+# display_tz = ""
+
+[ingest]
+# reorder_hold_seconds = 3.0        # reorder window before finite-differencing
+# dedup_ttl_seconds = 60.0
+# reconnect_base_seconds = 1.0      # exponential backoff base
+# reconnect_max_seconds = 120.0
+# reconnect_jitter = 0.3
+
+[tracker]
+# burst_drop_m = 300.0              # alt below running max to call burst
+# burst_consecutive = 3
+# float_rate_abs_mps = 1.0
+# float_min_alt_m = 12000.0
+# float_window_seconds = 300.0
+# landed_alt_above_ground_m = 300.0
+# landed_timeout_seconds = 180.0
+# A DESCENT flight that drops below the radio horizon above the low band is on
+# the ground within minutes; after this gap it is closed out (no landing-truth
+# record - the last fix was nowhere near the ground).
+# descent_lost_timeout_seconds = 600.0
+# stale_flight_seconds = 21600.0    # silent this long = over, whatever the altitude
+# launch_max_agl_m = 1500.0         # claim a launch site only if first heard this low
+# new_ascent_climb_m = 500.0        # climb above the landing alt to declare a relaunch
+# new_ascent_consecutive = 3        # ...sustained for this many frames (GPS noise gate)
+# Flown-track breadcrumb capture (the actual path on the map): keep a point once
+# the sonde moves this far horizontally, OR this much vertically, OR this long passes.
+# track_min_move_m = 250.0
+# track_min_alt_m = 200.0
+# track_min_interval_s = 30.0
+# Vertical rate = least-squares regression over this window, not a single noisy
+# frame pair; falls back to the frame pair below the point/span minimums.
+# vrate_window_seconds = 25.0
+# vrate_min_points = 3
+# vrate_min_span_seconds = 4.0
+# Frame-level teleport gate: reject a frame implying an impossible speed from
+# the last accepted fix; accept after this many consecutive rejections (the
+# sonde genuinely is where it says).
+# glitch_horizontal_mps = 250.0
+# glitch_vertical_mps = 150.0
+# glitch_accept_after = 5
+
+[profile]
+# bin_size_m = 150.0               # wind-profile altitude bin
+# max_horizontal_mps = 200.0       # plausibility gate
+# max_alt_step_mps = 90.0          # must clear real post-burst fall rates (40-70 m/s)
+# min_dt_seconds = 0.5             # ignore segments shorter than this
+# gfs_blend_enabled = true         # blend measured winds toward GFS with distance/age
+# gfs_blend_distance_km = 60.0     # e-folding distance of trust in the ascent column
+# gfs_blend_age_s = 5400.0         # e-folding age of trust
+# gfs_blend_min_agl_m = 3000.0     # below this AGL use model winds outright (terrain-local BL)
+# interior_gap_fill_m = 600.0      # fill wider measured-profile holes from GFS
+# correction_mode = "blend"        # "blend" (replace) or "bias" (model + measured-minus-model)
+# descent_refresh_enabled = true   # descent telemetry keeps refreshing the wind column
+# descent_refresh_n_cap = 8        # stale bin contents count as at most this many samples
+
+[descent]
+# transient_seconds = 45.0         # exclude post-burst transient
+# transient_drop_m = 1000.0
+# b_min = 2.0                      # ballistic constant clamp
+# b_max = 30.0
+# recency_halflife_s = 120.0
+# min_fit_points = 4
+# default_b = 5.5                  # pre-burst / no-data ballistic constant
+# Descent character sometimes changes mid-fall (remnants detach, the chute
+# inflates lower down); a relative jump bigger than this resets the fit to
+# post-change samples only.
+# regime_change_rel = 0.25
+# regime_recent_points = 12
+
+[integrator]
+# dt_seconds = 1.0                 # Heun (midpoint-averaged) step
+# max_iterations = 200000
+# max_sim_seconds = 21600.0
+
+[ensemble]                         # Monte Carlo landing ensemble
+# enabled = true                   # landing = ensemble mean; radius = member spread
+# n_members = 100                  # descent members
+# n_members_preburst = 60          # pre-burst members (runs for every sonde aloft)
+# dt_seconds = 2.0                 # member step (perturbations dominate dt error)
+# min_interval_seconds = 60.0      # refresh cadence per flight (sonde time); cached
+#                                  # offset rides the per-frame prediction in between
+# wind_sigma_measured_mps = 1.2    # wind error inside the measured column
+# wind_sigma_extrapolated_mps = 3.0
+# wind_corr_length_m = 1500.0      # vertical correlation of the wind error
+# wind_bias_sigma_mps = 1.5        # per-member constant offset (shared model bias)
+# b_sigma_rel_fit = 0.05           # relative B spread floor for a real fit
+# b_sigma_rel_shortcut = 0.18      # ...for the single-point shortcut
+# b_sigma_rel_preburst = 0.30      # ...for the assumed pre-burst chute
+# burst_alt_sigma_m = 1500.0       # pre-burst spreads
+# ascent_rate_sigma_rel = 0.10
+# quantile = 0.68                  # radius = this quantile of the member spread
+# Fixed RNG seed for reproducible runs; omit for stable per-flight seeding.
+# seed = 12345
+
+[uncertainty]                      # heuristic fallback when the ensemble is off
+# base_km = 0.3                    # calibration knobs - tune via replay/backtest
+# per_hour_measured_km = 1.5
+# per_hour_extrapolated_km = 6.0
+# fit_residual_km_per_mps = 0.15
+# radius_scale = 1.0               # multiplier on every published radius; the
+#                                  # backtest's "radius scale for 68%" drops in here
+
+[predict]
+# preburst_enabled = true          # also predict landings for sondes still ascending
+# predict_active_seconds = 30.0    # cadence of the airborne-flight prediction sweep
+# path_max_points = 64             # max sampled points in a predicted trajectory (the map path)
+# descent_predict_seconds = 10.0   # re-predict a descending sonde at most this often
+#                                  # (burst itself always predicts immediately)
+# preburst_min_coverage = 0.7      # publish pre-burst only when the wind column ahead
+#                                  # is known (GFS reachable or measured coverage >= this)
+# use_measured_winds = true        # ablation switch: false = model (GFS) winds only
+
+[roi]
+# capture_margin_km = 300.0        # capture ROI = subscriber circles + this
+# Tracked flights whose last position falls outside the capture ROI are
+# dropped (no landing record, no alert) - whether the sonde flew away or a
+# subscriber edit moved/shrank the box.
+
+[notify]
+# map_url_template = "https://www.openstreetmap.org/?mlat={lat}&mlon={lon}#map=13/{lat}/{lon}"
+# track_url_template = "https://sondehub.org/{serial}"
+# update_move_km = 5.0
+# update_throttle_seconds = 600.0
+# request_timeout_seconds = 10.0
+
+[dem]
+# path = "dem"                     # directory of DEM tiles
+# enabled = true                   # false → flat sea-level fallback
+# "auto" uses GLO-30-named tiles when present, else indexes any geographic-CRS
+# GeoTIFFs by their bounds (e.g. USGS 3DEP 1/3-arcsec 10 m tiles for CONUS).
+# source = "auto"                  # auto | glo30 | tiles
+# While enabled, an in-app timer thread downloads the GLO-30 tiles covering the
+# capture ROI into `path` (terrain is static: it converges once, then no-ops;
+# a subscriber edit that grows the ROI fetches the new tiles within a check).
+# Set false to manage tiles yourself (read-only mount, own tile set).
+# download_in_process = true
+# download_check_seconds = 300.0
+# download_url = "https://copernicus-dem-30m.s3.amazonaws.com/{name}/{name}.tif"
+
+[gfs]
+# path = "gfs"                     # GRIB cache filled by the in-app downloader
+# enabled = false                  # fallback wind source; the setup wizard asks
+# download_cadence_hours = 6.0
+# download_in_process = true       # run the downloader as an in-app timer thread
+# Defaults download hourly forecast steps f000..f012 of UGRD/VGRD/HGT/TMP on
+# isobaric levels; the predictor interpolates the wind 4-D (lat, lon, alt, time)
+# along the trajectory.
+# download_fxx = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+# download_levels = ':(?:UGRD|VGRD|HGT|TMP):\d+(?:\.\d+)? mb:'
+# A cycle only becomes usable this long after its run time (GFS publishes
+# ~3.5-4 h late); keeps backtests honest, a no-op for live caches.
+# publication_latency_hours = 3.8
+# Downloaded files are level-subset but spatially global; only a ±window_deg
+# subgrid around the flight is loaded into memory (a global cube is ~1 GB).
+# window_deg = 5.0
+# Live downloads prune cycles older than keep_hours (~1.6 GB/cycle unpruned);
+# 0 disables. Pinned historical downloads (backtests) never prune.
+# keep_hours = 0.0
+
+[hrrr]
+# NOAA's 3 km CONUS model, hourly cycles - much better boundary-layer/terrain
+# winds than GFS where it exists. Pressure files top out near 50 hPa (~20 km);
+# with both models enabled the predictor samples HRRR below the ceiling and
+# GFS above. Files are full-CONUS (variable-subset); windowed at read time.
+# path = "hrrr"
+# enabled = false                  # CONUS only; the setup wizard asks
+# ceiling_m = 20000.0              # hand over to GFS above this altitude
+# blend_ramp_m = 1500.0            # width of the HRRR→GFS blend zone
+# window_deg = 3.0                 # subgrid half-width loaded around the flight
+# download_cadence_hours = 1.0     # HRRR runs hourly
+# download_in_process = true
+# download_fxx = [0, 1, 2, 3]
+# download_levels = ':(?:UGRD|VGRD|HGT|TMP):\d+(?:\.\d+)? mb:'
+# publication_latency_hours = 1.0  # HRRR publishes ~50 min after the hour
+# keep_hours = 0.0                 # live-download cache pruning; 0 = off (see [gfs])
+
+[web]                              # dashboard UI, served in-process by `tallyho run`
+# enabled = true
+# host = "127.0.0.1"               # bare-metal default; the Docker image binds 0.0.0.0
+#                                  # (login required - set up on first run)
+# port = 8080
