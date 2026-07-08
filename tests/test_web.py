@@ -91,6 +91,35 @@ def test_index_served(client):
     assert "leaflet" in r.text.lower()
 
 
+def test_pages_reference_resolvable_assets(client):
+    """Every /static href/src the pages emit must actually be served -
+    guards against a renamed/moved CSS or JS file breaking a page."""
+    import re
+
+    for page in ("/", "/login"):
+        html = client.get(page).text
+        assets = re.findall(r'(?:href|src)="(/static/[^"]+)"', html)
+        assert assets, f"{page} references no static assets?"
+        for path in assets:
+            assert client.get(path).status_code == 200, f"{page} -> {path}"
+
+
+def test_static_assets_are_public():
+    """CSS/JS (and vendored Leaflet) must load without a session - the login
+    page needs its stylesheet before any cookie exists."""
+    store = Store(":memory:")
+    try:
+        c = TestClient(create_app(Config(), store))  # deliberately no login()
+        for path, ctype in [("/static/theme.css", "text/css"),
+                            ("/static/js/dashboard.js", "javascript"),
+                            ("/static/vendor/leaflet/leaflet.js", "javascript")]:
+            r = c.get(path, follow_redirects=False)
+            assert r.status_code == 200, path
+            assert ctype in r.headers["content-type"], path
+    finally:
+        store.close()
+
+
 def test_health_stale_without_heartbeat(tmp_path):
     """/api/health is the container healthcheck: no (or stale) heartbeat = 503,
     and it must answer without a login."""

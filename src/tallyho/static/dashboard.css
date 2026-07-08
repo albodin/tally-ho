@@ -1,0 +1,29 @@
+/* Dashboard-only layout: header, map, tables, the watched-location form.
+   Palette and base controls come from theme.css. */
+:root { --track:#5ad1c8; --gfs:#a98bff; }  /* map-line colors, read by JS via cssVar() */
+header { padding:10px 16px; border-bottom:1px solid var(--line); display:flex;
+         align-items:baseline; gap:14px; flex-wrap:wrap; }
+header h1 { font-size:18px; margin:0; }
+header .meta { color:var(--muted); font-size:12px; }
+#map { height:48vh; min-height:320px; width:100%; background:#0a0d11; }
+main { padding:14px 16px 40px; }
+section { margin-top:22px; }
+h2 { font-size:14px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted);
+     border-bottom:1px solid var(--line); padding-bottom:6px; }
+table { width:100%; border-collapse:collapse; font-size:13px; }
+th,td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
+th { color:var(--muted); font-weight:600; }
+tr:hover td { background:#161d26; }
+.pill { padding:1px 7px; border-radius:10px; font-size:11px; font-weight:600; }
+.ASCENT{background:#23405f;color:#bcdcff}.FLOAT{background:#3a3357;color:#d5c9ff}
+.DESCENT{background:#5a4020;color:#ffd9a8}.LANDED{background:#244a30;color:#bff0c9}
+.muted { color:var(--muted); }
+form { background:var(--panel); border:1px solid var(--line); border-radius:8px;
+       padding:14px; display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr));
+       gap:10px 14px; align-items:end; }
+.form-actions { grid-column:1/-1; display:flex; gap:10px; align-items:center; }
+.hint { grid-column:1/-1; color:var(--muted); font-size:12px; margin:-2px 0 2px; }
+#status { margin:10px 0; }
+.empty { color:var(--muted); font-style:italic; padding:8px; }
+.svg-icon { background:none; border:0; }
+.svg-icon svg { display:block; filter:drop-shadow(0 1px 1.5px rgba(0,0,0,.55)); }

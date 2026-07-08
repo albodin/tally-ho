@@ -38,7 +38,9 @@ where = ["src"]
 [tool.setuptools.package-data]
 # Ship the web UI pages and the config template inside the wheel so `tallyho`
 # can serve/seed them from an installed environment (not just a source checkout).
-tallyho = ["static/*.html", "config.example.toml"]
+tallyho = ["static/*.html", "static/*.css", "static/js/*.js",
+           "static/vendor/leaflet/*", "static/vendor/leaflet/images/*",
+           "config.example.toml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

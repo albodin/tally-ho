@@ -88,6 +88,14 @@ def test_wizard_serves_page_everywhere(wizard):
     assert r.status_code == 307 or r.status_code == 302 or r.status_code == 200
 
 
+def test_wizard_serves_static_assets(wizard):
+    """The wizard page links the shared stylesheet; the /static mount must win
+    over the catch-all redirect."""
+    r = wizard.get("/static/theme.css", follow_redirects=False)
+    assert r.status_code == 200
+    assert "text/css" in r.headers["content-type"]
+
+
 def test_wizard_completes_setup(wizard):
     r = wizard.post("/api/setup", json=_payload(hrrr_enabled=True))
     assert r.status_code == 200

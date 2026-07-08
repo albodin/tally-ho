@@ -90,6 +90,9 @@ class LoginLimiter:
 # Paths reachable without a session: the healthcheck, the login page and its
 # POST. Everything else - pages and API alike - needs the cookie.
 PUBLIC_PATHS = frozenset({"/api/health", "/api/login", "/login", "/favicon.ico"})
+# Static assets (CSS/JS/vendored Leaflet) hold no data - and the login page
+# needs its stylesheet before there is a session.
+PUBLIC_PREFIX = "/static/"
 
 
 class RequireSession:
@@ -100,7 +103,8 @@ class RequireSession:
         self.app = app
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] != "http" or scope["path"] in PUBLIC_PATHS:
+        if (scope["type"] != "http" or scope["path"] in PUBLIC_PATHS
+                or scope["path"].startswith(PUBLIC_PREFIX)):
             await self.app(scope, receive, send)
             return
         if scope.get("session", {}).get("user"):

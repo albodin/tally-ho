@@ -106,6 +106,7 @@ def create_app(cfg: Config, store: Store, ntfy_sink=None):
     try:
         from fastapi import FastAPI, HTTPException, Request, Response
         from fastapi.responses import FileResponse, JSONResponse
+        from fastapi.staticfiles import StaticFiles
         from pydantic import BaseModel, ConfigDict, Field
         from starlette.middleware.sessions import SessionMiddleware
     except ImportError as exc:  # pragma: no cover - exercised only without the extra
@@ -159,6 +160,9 @@ def create_app(cfg: Config, store: Store, ntfy_sink=None):
     app.add_middleware(RequireSession)
     app.add_middleware(SessionMiddleware, secret_key=session_secret(store),
                        max_age=SESSION_MAX_AGE, same_site="lax")
+    # CSS/JS + vendored Leaflet; auth-exempt (see PUBLIC_PREFIX) so the login
+    # page can load its stylesheet.
+    app.mount("/static", StaticFiles(directory=_STATIC), name="static")
 
     limiter = LoginLimiter()
     # Verifying against this when the username is unknown keeps the response

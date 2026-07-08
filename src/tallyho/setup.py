@@ -72,6 +72,7 @@ def create_setup_app(cfg: Config, store: Store, config_path: str | Path,
     try:
         from fastapi import FastAPI, HTTPException, Request
         from fastapi.responses import FileResponse, RedirectResponse
+        from fastapi.staticfiles import StaticFiles
         from pydantic import BaseModel, ConfigDict, Field
         from starlette.middleware.sessions import SessionMiddleware
     except ImportError as exc:
@@ -96,6 +97,9 @@ def create_setup_app(cfg: Config, store: Store, config_path: str | Path,
     # handover to the real dashboard.
     app.add_middleware(SessionMiddleware, secret_key=session_secret(store),
                        max_age=SESSION_MAX_AGE, same_site="lax")
+    # Mounted before the routes so the wizard's stylesheet isn't swallowed by
+    # the catch-all redirect below.
+    app.mount("/static", StaticFiles(directory=_SETUP_HTML.parent), name="static")
 
     @app.get("/", include_in_schema=False)
     def wizard():
