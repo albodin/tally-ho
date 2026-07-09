@@ -5,8 +5,9 @@ predictions, and the alert de-dup table. Ingest can run on Paho's callback
 thread, so every connection use is guarded by a lock and the connection is
 opened with ``check_same_thread=False``.
 
-Secrets (ntfy tokens) are never stored here - only a *reference* (an env-var
-name) lives in the DB.
+ntfy bearer tokens live in their own table, keyed by the name subscribers
+reference (``ntfy_token_ref``). They are write-only above this module: the web
+API accepts a value but never returns one, and only the send path reads it.
 """
 
 from __future__ import annotations
@@ -32,6 +33,14 @@ CREATE TABLE IF NOT EXISTS subscribers (
     ntfy_token_ref TEXT,
     active        INTEGER NOT NULL DEFAULT 1,
     created_at    TEXT NOT NULL
+);
+
+-- ntfy bearer tokens, keyed by the name subscribers reference (ntfy_token_ref).
+-- Write-only outside this module: no API response ever carries `token`.
+CREATE TABLE IF NOT EXISTS ntfy_tokens (
+    name       TEXT PRIMARY KEY,
+    token      TEXT NOT NULL,
+    updated_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS flights (
@@ -699,6 +708,50 @@ class Store:
     def count_users(self) -> int:
         with self._lock:
             return self._conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+
+    # ---- ntfy tokens --------------------------------------------------------
+    def set_ntfy_token(self, name: str, token: str) -> None:
+        """Save or replace the bearer token for ``name``."""
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO ntfy_tokens (name, token, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(name) DO UPDATE SET token=excluded.token, "
+                "updated_at=excluded.updated_at",
+                (name, token, _iso(datetime.now(timezone.utc))),
+            )
+            self._conn.commit()
+
+    def get_ntfy_token(self, name: str) -> str | None:
+        """The token value - for the send path only, never for API responses."""
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT token FROM ntfy_tokens WHERE name=?", (name,))
+            row = cur.fetchone()
+        return row["token"] if row else None
+
+    def list_ntfy_tokens(self) -> list[dict]:
+        """Token metadata for the UI: name, a last-4 hint, when it was last set,
+        and how many subscribers reference it - never the value itself."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT t.name, t.token, t.updated_at, "
+                "(SELECT COUNT(*) FROM subscribers s WHERE s.ntfy_token_ref = t.name) "
+                "AS refs FROM ntfy_tokens t ORDER BY t.name").fetchall()
+        return [{"name": r["name"], "hint": "…" + r["token"][-4:],
+                 "updated_at": r["updated_at"], "refs": r["refs"]} for r in rows]
+
+    def delete_ntfy_token(self, name: str) -> bool:
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM ntfy_tokens WHERE name=?", (name,))
+            self._conn.commit()
+        return cur.rowcount > 0
+
+    def ntfy_token_refs(self, name: str) -> int:
+        """How many subscribers reference this token name (delete protection)."""
+        with self._lock:
+            return self._conn.execute(
+                "SELECT COUNT(*) FROM subscribers WHERE ntfy_token_ref=?",
+                (name,)).fetchone()[0]
 
     def get_kv(self, key: str) -> str | None:
         with self._lock:

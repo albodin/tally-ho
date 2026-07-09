@@ -366,3 +366,36 @@ def test_latest_tracks_for_active_excludes_landed(store):
     tracks = store.latest_tracks_for_active()
     assert {t["serial"] for t in tracks} == {"UP"}  # the LANDED flight is excluded
     assert tracks[0]["track"] == [[45.0, 7.0, 200.0], [45.2, 7.2, 9000.0]]
+
+
+# ---- ntfy tokens ------------------------------------------------------------
+def test_ntfy_token_roundtrip(store):
+    assert store.get_ntfy_token("home") is None
+    store.set_ntfy_token("home", "tk_secret_abcd")
+    assert store.get_ntfy_token("home") == "tk_secret_abcd"
+
+    toks = store.list_ntfy_tokens()
+    assert len(toks) == 1
+    assert toks[0]["name"] == "home"
+    assert toks[0]["hint"] == "…abcd"        # last 4 only
+    assert toks[0]["refs"] == 0
+    assert "token" not in toks[0]            # listing never carries the value
+
+    store.set_ntfy_token("home", "tk_rotated_wxyz")   # same name = replace
+    assert store.get_ntfy_token("home") == "tk_rotated_wxyz"
+    assert len(store.list_ntfy_tokens()) == 1
+
+    assert store.delete_ntfy_token("home") is True
+    assert store.delete_ntfy_token("home") is False
+    assert store.get_ntfy_token("home") is None
+
+
+def test_ntfy_token_ref_counting(store):
+    store.set_ntfy_token("home", "tk_x")
+    assert store.ntfy_token_refs("home") == 0
+    store.add_subscriber(Subscriber(
+        name="alice", lat=45.0, lon=7.0, radius_km=30,
+        ntfy_server="https://ntfy.sh", ntfy_topic="alice-sondes",
+        ntfy_token_ref="home"))
+    assert store.ntfy_token_refs("home") == 1
+    assert store.list_ntfy_tokens()[0]["refs"] == 1

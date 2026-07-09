@@ -14,9 +14,11 @@ Design notes:
   the request models and route handlers are defined *inside* ``create_app``, and
   FastAPI resolves handler type hints via ``get_type_hints`` - stringized
   annotations would fail to find those locally-scoped classes.
-* Secrets are never stored: a subscriber holds only a token *reference* (an
-  env-var name). The request model has no token field and forbids extras, so a
-  raw token can never be persisted.
+* ntfy tokens are write-only: ``PUT /api/tokens/{name}`` is the single place a
+  raw token is accepted, and no response ever carries a value (listings show a
+  last-4 hint). A subscriber holds only the token's *name*; its request model
+  has no token field and forbids extras, so a token can't land in the wrong
+  table.
 * Everything but ``/api/health``, ``/login`` and ``POST /api/login`` requires a
   session cookie (see :mod:`tallyho.auth`); the account is created by the
   first-run setup wizard (:mod:`tallyho.setup`).
@@ -26,7 +28,7 @@ import hashlib
 import json
 import logging
 import math
-import os
+import re
 import secrets
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -80,8 +82,8 @@ def _metrics_json(m) -> dict:
 
 
 def _serialize_subscriber(s: Subscriber) -> dict:
-    """Subscriber -> JSON dict. Note: emits ``ntfy_token_ref`` (an env-var name),
-    never an actual token - there is no token field to leak."""
+    """Subscriber -> JSON dict. Note: emits ``ntfy_token_ref`` (a saved token's
+    name), never an actual token - there is no token field to leak."""
     return {
         "id": s.id,
         "name": s.name,
@@ -119,7 +121,7 @@ def create_app(cfg: Config, store: Store, ntfy_sink=None):
 
     class SubscriberIn(BaseModel):
         # Reject unknown fields so a stray `ntfy_token` (a secret) is a 422, not
-        # a silent write - secrets must never reach the DB.
+        # a silent write - tokens go only through PUT /api/tokens/{name}.
         model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
         name: str = Field(min_length=1)
         lat: float = Field(ge=-90, le=90)
@@ -129,7 +131,7 @@ def create_app(cfg: Config, store: Store, ntfy_sink=None):
         # Blank topic == watch-only: the location is tracked and shown on the map
         # but never sends an ntfy alert (run without ntfy configured).
         ntfy_topic: str = ""
-        # env-var NAME holding the ntfy token, never the token itself
+        # NAME of a saved ntfy token (see /api/tokens), never the token itself
         ntfy_token_ref: str | None = None
         active: bool = True
 
@@ -139,7 +141,7 @@ def create_app(cfg: Config, store: Store, ntfy_sink=None):
 
     class TestNtfyIn(BaseModel):
         # Same no-secret-in-body rule as SubscriberIn: only a token *reference*
-        # (env-var name) is accepted, never a raw token; extras are a 422.
+        # (a saved token's name) is accepted, never a raw token; extras are a 422.
         model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
         # Both required and non-blank: a test must name an explicit destination,
         # so an omitted/blank server is a 422 rather than a silent ntfy.sh fallback.
@@ -461,19 +463,58 @@ def create_app(cfg: Config, store: Store, ntfy_sink=None):
             raise HTTPException(status_code=404, detail="subscriber not found")
         return {"deleted": sub_id}
 
+    # ---- ntfy tokens (write-only: a saved value never leaves the server) --
+    class TokenIn(BaseModel):
+        # The one place a raw secret is accepted, behind the session cookie.
+        model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+        token: str = Field(min_length=1)
+
+    def _valid_token_name(name: str) -> str:
+        # Path-segment-safe and dropdown-friendly; same charset the UI enforces.
+        if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", name):
+            raise HTTPException(
+                status_code=422,
+                detail="token name must be 1-64 chars of letters, digits, _ . -")
+        return name
+
+    @app.get("/api/tokens")
+    def list_tokens():
+        """Saved-token metadata (name, last-4 hint, reference count) - values
+        are never returned by any route."""
+        return store.list_ntfy_tokens()
+
+    @app.put("/api/tokens/{name}")
+    def put_token(name: str, payload: TokenIn):
+        """Save or replace a token. The daemon resolves tokens per send, so a
+        new/rotated value takes effect without a restart."""
+        store.set_ntfy_token(_valid_token_name(name), payload.token)
+        return next(t for t in store.list_ntfy_tokens() if t["name"] == name)
+
+    @app.delete("/api/tokens/{name}")
+    def delete_token(name: str):
+        refs = store.ntfy_token_refs(name)
+        if refs:
+            raise HTTPException(
+                status_code=409,
+                detail=f"token {name!r} is used by {refs} watched location(s) - "
+                       "point them at another token first")
+        if not store.delete_ntfy_token(name):
+            raise HTTPException(status_code=404, detail="token not found")
+        return {"deleted": name}
+
     @app.post("/api/test-ntfy")
     def test_ntfy(payload: TestNtfyIn):
         """Send a one-off test notification so a user can confirm an ntfy setup
         before saving a watched location. A token is used only by *reference*
-        (env-var name), resolved at send time exactly like a live alert - no raw
-        token is ever accepted in the request body."""
+        (a saved token's name), resolved at send time exactly like a live alert
+        - no raw token is ever accepted in the request body."""
         from .notify import HttpNtfySink, NtfyMessage
 
         token_ref = payload.ntfy_token_ref or None
-        # If the referenced env-var isn't set in this process, send unauthenticated
-        # (works for public topics) and warn - rather than pretend a private topic
-        # is reachable when the daemon would also lack the token.
-        token_missing = bool(token_ref) and token_ref not in os.environ
+        # If no token is saved under that name, send unauthenticated (works for
+        # public topics) and warn - rather than pretend a private topic is
+        # reachable when live alerts would also lack the token.
+        token_missing = bool(token_ref) and store.get_ntfy_token(token_ref) is None
         msg = NtfyMessage(
             server=payload.ntfy_server, topic=payload.ntfy_topic,
             title="Tally-ho test", priority=3, tags=["balloon", "white_check_mark"],
@@ -481,19 +522,20 @@ def create_app(cfg: Config, store: Store, ntfy_sink=None):
                  "ntfy is wired up correctly.",
             token_ref=None if token_missing else token_ref,
         )
-        sink = ntfy_sink if ntfy_sink is not None else HttpNtfySink()
+        sink = (ntfy_sink if ntfy_sink is not None
+                else HttpNtfySink(token_lookup=store.get_ntfy_token))
         if not sink.send(msg):
             detail = ("ntfy server didn't accept the message - check the "
                       "server URL and topic")
             if token_ref and not token_missing:
-                detail += (f", and that the token in env-var {token_ref!r} is "
+                detail += (f", and that the token {token_ref!r} is "
                            "valid for this topic")
             raise HTTPException(status_code=502, detail=detail + ".")
         note = None
         if token_missing:
-            note = (f"sent without auth - the env-var {token_ref!r} isn't set "
-                    "in this process, so a private topic would be rejected. Set it "
-                    "in the daemon's environment before relying on alerts.")
+            note = (f"sent without auth - no token named {token_ref!r} is saved, "
+                    "so a private topic would be rejected. Save it under ntfy "
+                    "tokens before relying on alerts.")
         return {"ok": True, "note": note}
 
     return app

@@ -58,7 +58,8 @@ class App:
             climatology=Climatology(self.store),
         )
         self.alerts = AlertManager(cfg, self.store, sink or HttpNtfySink(
-            timeout=cfg.notify.request_timeout_seconds))
+            timeout=cfg.notify.request_timeout_seconds,
+            token_lookup=self.store.get_ntfy_token))
         self.last_frame_at: datetime | None = None
         self._subscribers = []
         self._capture_box = None

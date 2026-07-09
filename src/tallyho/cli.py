@@ -4,6 +4,9 @@
     tallyho subscriber add ...          # onboard a friend (v1 onboarding)
     tallyho subscriber list
     tallyho subscriber deactivate --id N
+    tallyho token set NAME              # save an ntfy bearer token (prompted/stdin)
+    tallyho token list
+    tallyho token delete NAME
     tallyho replay --file frames.json   # accuracy harness on archived frames
     tallyho replay --serial S1234567    # download from SondeHub, then replay
     tallyho accuracy                    # score saved predictions vs actual landings
@@ -48,10 +51,20 @@ def main(argv: list[str] | None = None) -> int:
                      help="ntfy topic; omit (or leave blank) for a watch-only "
                           "location that is tracked/shown but never sends alerts")
     add.add_argument("--token-ref", default=None,
-                     help="ENV VAR NAME holding the ntfy token (never the token itself)")
+                     help="NAME of a saved ntfy token ('tallyho token set NAME'), "
+                          "never the token itself")
     ssub.add_parser("list")
     deact = ssub.add_parser("deactivate")
     deact.add_argument("--id", type=int, required=True)
+
+    tk = sub.add_parser("token", help="manage ntfy bearer tokens (or use the web UI)")
+    tsub = tk.add_subparsers(dest="subcmd", required=True)
+    tset = tsub.add_parser("set", help="save/replace a token; the value is prompted "
+                                       "(or piped on stdin), never a CLI argument")
+    tset.add_argument("name")
+    tsub.add_parser("list", help="saved token names (never values)")
+    trm = tsub.add_parser("delete")
+    trm.add_argument("name")
 
     rp = sub.add_parser("replay", help="run the accuracy harness")
     rp.add_argument("--file", help="JSON file: a list of raw telemetry dicts")
@@ -110,6 +123,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_run(cfg, args.config)
     if args.cmd == "subscriber":
         return _cmd_subscriber(cfg, args)
+    if args.cmd == "token":
+        return _cmd_token(cfg, args)
     if args.cmd == "replay":
         return _cmd_replay(cfg, args)
     if args.cmd == "accuracy":
@@ -170,6 +185,50 @@ def _cmd_subscriber(cfg, args) -> int:
         elif args.subcmd == "deactivate":
             store.set_subscriber_active(args.id, False)
             print(f"deactivated subscriber {args.id}")
+        return 0
+    finally:
+        store.close()
+
+
+def _cmd_token(cfg, args) -> int:
+    """ntfy bearer tokens, stored in the DB and referenced by name from
+    subscribers. `set` reads the value from a prompt (tty) or stdin (piped) -
+    never from argv, which would land in shell history and `ps`."""
+    import re
+
+    store = Store(cfg.db_path)
+    try:
+        if args.subcmd == "set":
+            if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", args.name):
+                print("token name must be 1-64 chars of letters, digits, _ . -",
+                      file=sys.stderr)
+                return 2
+            if sys.stdin.isatty():
+                import getpass
+                token = getpass.getpass(f"token for {args.name!r}: ")
+            else:
+                token = sys.stdin.readline().strip()
+            if not token:
+                print("empty token; nothing saved", file=sys.stderr)
+                return 2
+            store.set_ntfy_token(args.name, token)
+            print(f"saved token {args.name!r}")
+        elif args.subcmd == "list":
+            toks = store.list_ntfy_tokens()
+            if not toks:
+                print("no tokens saved")
+            for t in toks:
+                print(f"{t['name']}  {t['hint']}  used by {t['refs']} location(s)")
+        elif args.subcmd == "delete":
+            refs = store.ntfy_token_refs(args.name)
+            if refs:
+                print(f"token {args.name!r} is used by {refs} location(s); "
+                      "point them at another token first", file=sys.stderr)
+                return 2
+            if not store.delete_ntfy_token(args.name):
+                print(f"no token named {args.name!r}", file=sys.stderr)
+                return 2
+            print(f"deleted token {args.name!r}")
         return 0
     finally:
         store.close()

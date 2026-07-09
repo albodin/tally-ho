@@ -11,7 +11,7 @@ body { margin:0; font:14px/1.45 system-ui,sans-serif; background:var(--bg); colo
 a { color:var(--accent); text-decoration:none; }
 a:hover { text-decoration:underline; }
 label { display:flex; flex-direction:column; gap:4px; font-size:12px; color:var(--muted); }
-input { background:#0d1218; border:1px solid var(--line); color:var(--fg);
+input, select { background:#0d1218; border:1px solid var(--line); color:var(--fg);
         border-radius:6px; padding:8px 9px; font:inherit; }
 button { background:var(--accent); color:#04121f; border:0; border-radius:6px;
          padding:9px 14px; font:inherit; font-weight:600; cursor:pointer; }

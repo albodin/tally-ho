@@ -30,8 +30,9 @@ pip install -e ./predictor      # the prediction engine (`windfall`)
 pip install -e ".[dev]"         # the service + tests; add ingest,dem,gfs,api as needed
 pytest                          # offline; engine tests: (cd predictor && pytest)
 
+tallyho token set alice         # ntfy bearer token, prompted (private topics only)
 tallyho subscriber add --name alice --lat 45.0 --lon 7.0 --radius 30 \
-    --ntfy-server https://ntfy.sh --ntfy-topic alice-sondes --token-ref NTFY_ALICE
+    --ntfy-server https://ntfy.sh --ntfy-topic alice-sondes --token-ref alice
 tallyho run                     # dashboard at http://127.0.0.1:8080 (api extra)
 ```
 
@@ -46,7 +47,6 @@ tallyho run                     # dashboard at http://127.0.0.1:8080 (api extra)
 
 ```bash
 cp .env.example .env                # host wiring: PUID/PGID, timezone, port, paths
-cp secrets.env.example secrets.env  # ntfy tokens
 docker compose up -d --build        # or the published image: uncomment TALLYHO_IMAGE
                                     #   in .env (ghcr.io/albodin/tally-ho:latest)
 ```
@@ -66,9 +66,10 @@ its built-in default - uncomment a line to change it; every setting is
 documented in the file itself. Any value can also be set with a
 `TALLYHO_<SECTION>_<KEY>` env var, which beats the file.
 
-Secrets never live in config or the DB: a subscriber stores only the *name* of
-the environment variable holding its ntfy token (e.g. `NTFY_ALICE`), read at
-send time.
+ntfy bearer tokens (private topics only) are saved in the web UI's **ntfy
+tokens** panel or with `tallyho token set NAME`; a watched location references
+a token by name. Tokens are write-only: no API response or page ever shows a
+saved value (only its last 4 characters).
 
 ## Accuracy
 

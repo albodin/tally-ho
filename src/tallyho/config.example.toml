@@ -10,7 +10,8 @@
 # (e.g. TALLYHO_INTEGRATOR_DT_SECONDS=2), or TALLYHO_<KEY> for top-level keys;
 # env overrides beat this file. The Docker image uses that for the fixed
 # in-container paths (/data, /gfs, /hrrr, /dem) and the container bind address.
-# Secrets (ntfy tokens) are NEVER stored here - see [notify] / README.
+# Secrets (ntfy tokens) are NEVER stored here - add them in the web UI (or
+# `tallyho token set NAME`); watched locations reference them by name.
 
 # db_path = "data/tallyho.db"
 # log_level = "INFO"

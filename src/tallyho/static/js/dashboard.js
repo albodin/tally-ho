@@ -5,6 +5,7 @@ import { refreshMap } from "./map.js";
 import { refreshHistory } from "./history.js";
 import { refreshAccuracy, refreshAlerts, refreshFlights, refreshSubs } from "./tables.js";
 import { initSubscribers } from "./subscribers.js";
+import { initTokens, refreshTokens } from "./tokens.js";
 
 const REFRESH_MS = 15000;
 
@@ -25,7 +26,7 @@ async function loadConfig() {
 async function refreshAll() {
   try {
     await Promise.all([refreshHealth(), refreshMap(), refreshFlights(), refreshAlerts(),
-                       refreshAccuracy(), refreshSubs(), refreshHistory()]);
+                       refreshAccuracy(), refreshSubs(), refreshTokens(), refreshHistory()]);
     if ($("status").classList.contains("err")) status(null);
   } catch (e) { status("Refresh failed: " + e.message); }
 }
@@ -56,6 +57,7 @@ $("alerts-clear").addEventListener("click", async () => {
 });
 
 initSubscribers(refreshAll);
+initTokens();
 // Load DISPLAY_TZ before the first paint so times never flash in UTC first.
 loadConfig().then(refreshAll);
 setInterval(refreshAll, REFRESH_MS);

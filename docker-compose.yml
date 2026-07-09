@@ -35,10 +35,6 @@ services:
       # Sessions travel plain HTTP - fine on a LAN, put a TLS reverse proxy in
       # front for anything wider. Host port overridable in .env.
       - "${TALLYHO_PORT:-8080}:8080"
-    env_file:
-      # ntfy bearer tokens, referenced by name from the DB (e.g. NTFY_ALICE=tk_xxx).
-      - path: ./secrets.env
-        required: false
     healthcheck:
       test: ["CMD", "tallyho", "health"]
       interval: 30s

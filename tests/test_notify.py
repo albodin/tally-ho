@@ -177,3 +177,54 @@ def test_dedup_persists_in_store(store):
     row = store.get_alert(subs[0].id, "S1", DAY, AlertType.INBOUND)
     assert row is not None
     assert row["distance_km"] is not None
+
+
+# ---- HttpNtfySink: token resolution + header assembly (offline) ------------
+class _FakeResp:
+    status = 200
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def _capture_urlopen(monkeypatch):
+    import urllib.request
+
+    captured = {}
+
+    def fake_urlopen(req, timeout=None):
+        captured["req"], captured["timeout"] = req, timeout
+        return _FakeResp()
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    return captured
+
+
+def test_http_sink_resolves_token_ref_via_lookup(monkeypatch):
+    from tallyho.notify import HttpNtfySink
+
+    captured = _capture_urlopen(monkeypatch)
+    sink = HttpNtfySink(timeout=5.0, token_lookup={"home": "tk_value"}.get)
+    ok = sink.send(NtfyMessage(server="https://ntfy.sh/", topic="t",
+                               title="T", body="b", token_ref="home"))
+    assert ok
+    req = captured["req"]
+    assert req.full_url == "https://ntfy.sh/t"   # trailing slash normalized
+    assert req.get_header("Authorization") == "Bearer tk_value"
+    assert req.data == b"b"
+    assert captured["timeout"] == 5.0
+
+
+def test_http_sink_unknown_or_absent_ref_sends_unauthenticated(monkeypatch):
+    from tallyho.notify import HttpNtfySink
+
+    captured = _capture_urlopen(monkeypatch)
+    sink = HttpNtfySink(token_lookup={}.get)
+    # unknown name and no name at all both mean: no Authorization header
+    for ref in ("nope", None):
+        assert sink.send(NtfyMessage(server="https://ntfy.sh", topic="t",
+                                     title="T", body="b", token_ref=ref))
+        assert captured["req"].get_header("Authorization") is None

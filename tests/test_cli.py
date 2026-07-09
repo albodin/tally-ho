@@ -27,6 +27,46 @@ def test_subscriber_add_list_deactivate(tmp_path, capsys):
     assert "inactive" in out
 
 
+def test_token_set_list_delete(tmp_path, capsys, monkeypatch):
+    import io
+
+    db = tmp_path / "t.db"
+    # piped stdin (not a tty) supplies the value - it is never a CLI argument
+    monkeypatch.setattr("sys.stdin", io.StringIO("tk_secret_wxyz\n"))
+    rc = main(["--config", _cfg(tmp_path, db), "token", "set", "home"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "saved token 'home'" in out and "tk_secret_wxyz" not in out
+
+    main(["--config", _cfg(tmp_path, db), "token", "list"])
+    out = capsys.readouterr().out
+    assert "home" in out and "…wxyz" in out and "tk_secret_wxyz" not in out
+
+    # a token referenced by a subscriber refuses deletion
+    main(["--config", _cfg(tmp_path, db), "subscriber", "add",
+          "--name", "bob", "--lat", "45", "--lon", "7", "--radius", "25",
+          "--ntfy-topic", "bob-sondes", "--token-ref", "home"])
+    capsys.readouterr()
+    assert main(["--config", _cfg(tmp_path, db), "token", "delete", "home"]) == 2
+    assert "used by 1 location" in capsys.readouterr().err
+
+    monkeypatch.setattr("sys.stdin", io.StringIO("tk_other\n"))
+    main(["--config", _cfg(tmp_path, db), "token", "set", "spare"])
+    capsys.readouterr()
+    assert main(["--config", _cfg(tmp_path, db), "token", "delete", "spare"]) == 0
+    assert main(["--config", _cfg(tmp_path, db), "token", "delete", "spare"]) == 2
+
+
+def test_token_set_rejects_bad_name_and_empty_value(tmp_path, capsys, monkeypatch):
+    import io
+
+    db = tmp_path / "t.db"
+    assert main(["--config", _cfg(tmp_path, db), "token", "set", "bad name!"]) == 2
+    monkeypatch.setattr("sys.stdin", io.StringIO("\n"))
+    assert main(["--config", _cfg(tmp_path, db), "token", "set", "home"]) == 2
+    assert "empty token" in capsys.readouterr().err
+
+
 def test_replay_from_file(tmp_path, capsys, monkeypatch):
     # tiny ensemble via env override - this test is about the CLI plumbing
     monkeypatch.setenv("TALLYHO_ENSEMBLE_N_MEMBERS", "6")

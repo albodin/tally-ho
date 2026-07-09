@@ -174,7 +174,7 @@ def test_subscriber_crud_roundtrip(client):
     r = client.post("/api/subscribers", json=_payload())
     assert r.status_code == 201
     sid = r.json()["id"]
-    assert r.json()["ntfy_token_ref"] == "NTFY_HOME"  # an env-var ref, not a token
+    assert r.json()["ntfy_token_ref"] == "NTFY_HOME"  # a token name, not a token
 
     assert client.get(f"/api/subscribers/{sid}").json()["name"] == "home"
     assert len(client.get("/api/subscribers").json()) == 1
@@ -288,28 +288,95 @@ def test_test_ntfy_raw_token_field_is_rejected(sink_client):
     assert sink.sent == []
 
 
-def test_test_ntfy_present_token_ref_is_used(sink_client, monkeypatch):
-    monkeypatch.setenv("NTFY_TEST_TOK", "tk_value")
+def test_test_ntfy_saved_token_ref_is_used(sink_client):
+    sink = RecordingSink(ok=True)
+    c = sink_client(sink)
+    c.put("/api/tokens/test-tok", json={"token": "tk_value"})
+    r = c.post("/api/test-ntfy", json={
+        "ntfy_server": "https://ntfy.sh", "ntfy_topic": "t",
+        "ntfy_token_ref": "test-tok"})
+    assert r.status_code == 200
+    assert r.json()["note"] is None  # token saved → no warning
+    assert sink.sent[0].token_ref == "test-tok"  # ref passed through for auth
+
+
+def test_test_ntfy_unsaved_token_ref_sends_unauth_and_warns(sink_client):
     sink = RecordingSink(ok=True)
     c = sink_client(sink)
     r = c.post("/api/test-ntfy", json={
         "ntfy_server": "https://ntfy.sh", "ntfy_topic": "t",
-        "ntfy_token_ref": "NTFY_TEST_TOK"})
+        "ntfy_token_ref": "absent-tok"})
     assert r.status_code == 200
-    assert r.json()["note"] is None  # env-var present → no warning
-    assert sink.sent[0].token_ref == "NTFY_TEST_TOK"  # ref passed through for auth
-
-
-def test_test_ntfy_missing_token_ref_sends_unauth_and_warns(sink_client, monkeypatch):
-    monkeypatch.delenv("NTFY_ABSENT_TOK", raising=False)
-    sink = RecordingSink(ok=True)
-    c = sink_client(sink)
-    r = c.post("/api/test-ntfy", json={
-        "ntfy_server": "https://ntfy.sh", "ntfy_topic": "t",
-        "ntfy_token_ref": "NTFY_ABSENT_TOK"})
-    assert r.status_code == 200
-    assert "NTFY_ABSENT_TOK" in r.json()["note"]  # warns the env-var isn't set
+    assert "absent-tok" in r.json()["note"]  # warns no such token is saved
     assert sink.sent[0].token_ref is None  # sent without auth (don't fake a token)
+
+
+# ---- ntfy tokens: write-only lifecycle -------------------------------------
+def test_token_save_list_delete_never_echoes_value(client):
+    secret = "tk_supersecret999"
+    r = client.put("/api/tokens/home", json={"token": secret})
+    assert r.status_code == 200
+    assert r.json()["name"] == "home"
+    assert r.json()["hint"] == "…t999"       # last 4 only
+    assert secret not in r.text              # the value is never echoed back
+
+    listing = client.get("/api/tokens")
+    assert [t["name"] for t in listing.json()] == ["home"]
+    assert secret not in listing.text
+    assert "token" not in listing.json()[0]
+
+    # but the send path can read it (this is what the daemon's sink calls)
+    assert client.store.get_ntfy_token("home") == secret
+
+    # same name = replace (rotation)
+    client.put("/api/tokens/home", json={"token": "tk_rotated_abcd"})
+    assert client.get("/api/tokens").json()[0]["hint"] == "…abcd"
+    assert client.store.get_ntfy_token("home") == "tk_rotated_abcd"
+
+    assert client.delete("/api/tokens/home").json() == {"deleted": "home"}
+    assert client.delete("/api/tokens/home").status_code == 404
+    assert client.get("/api/tokens").json() == []
+
+
+def test_token_delete_refused_while_referenced(client):
+    client.put("/api/tokens/home", json={"token": "tk_x"})
+    r = client.post("/api/subscribers", json=_payload(ntfy_token_ref="home"))
+    sid = r.json()["id"]
+
+    r = client.delete("/api/tokens/home")
+    assert r.status_code == 409
+    assert "watched location" in r.json()["detail"]
+
+    client.delete(f"/api/subscribers/{sid}")
+    assert client.delete("/api/tokens/home").status_code == 200
+
+
+@pytest.mark.parametrize("bad", [
+    {"token": ""},                             # blank value
+    {"token": "x", "name": "smuggled"},        # extra field
+    {},                                        # missing value
+])
+def test_token_validation_rejects_bad_body(client, bad):
+    assert client.put("/api/tokens/home", json=bad).status_code == 422
+
+
+def test_token_name_charset_is_validated(client):
+    # %20 = space: path-reachable but rejected by the name rule
+    assert client.put("/api/tokens/bad%20name",
+                      json={"token": "tk_x"}).status_code == 422
+    assert client.put("/api/tokens/" + "a" * 65,
+                      json={"token": "tk_x"}).status_code == 422
+
+
+def test_tokens_require_a_session():
+    store = Store(":memory:")
+    try:
+        c = TestClient(create_app(Config(), store))  # deliberately no login()
+        assert c.get("/api/tokens").status_code == 401
+        assert c.put("/api/tokens/home",
+                     json={"token": "tk_x"}).status_code == 401
+    finally:
+        store.close()
 
 
 # ---- dashboard reads -----------------------------------------------------

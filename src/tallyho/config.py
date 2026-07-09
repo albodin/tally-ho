@@ -8,8 +8,8 @@ engine sees identical tuning in the live app and in offline backtests.
 
 Config comes from a TOML file plus environment-variable overrides
 (``TALLYHO_<SECTION>_<KEY>``). Secrets (ntfy tokens) are NEVER stored here -
-the DB/config holds only a *reference* (an env-var name); the actual token is
-read from the environment at send time.
+they are saved via the web UI (or ``tallyho token set``) into the DB's
+write-only token table, and subscribers reference them by name.
 """
 
 from __future__ import annotations

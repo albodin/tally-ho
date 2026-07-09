@@ -6,14 +6,14 @@
 * :class:`AlertManager` - INBOUND (descent-gated) / UPDATE (throttled) / LANDED
   lifecycle with persistent de-dup.
 
-Secrets: a subscriber stores only a *token reference* (an env-var name); the
-actual bearer token is read from the environment at send time.
+Secrets: a subscriber stores only a *token reference* (the name of a token
+saved in the DB); :class:`HttpNtfySink` resolves it to the bearer token at
+send time via its injected ``token_lookup`` (normally ``Store.get_ntfy_token``).
 """
 
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -57,12 +57,17 @@ class FakeNtfySink(NtfySink):
 
 
 class HttpNtfySink(NtfySink):
-    """POSTs to a real ntfy server via stdlib urllib (no extra dependency)."""
+    """POSTs to a real ntfy server via stdlib urllib (no extra dependency).
 
-    def __init__(self, timeout: float = 10.0):
+    ``token_lookup`` maps a token name (``Subscriber.ntfy_token_ref``) to its
+    bearer token, normally ``Store.get_ntfy_token`` - resolved per send so a
+    token saved or rotated in the web UI takes effect immediately."""
+
+    def __init__(self, timeout: float = 10.0, token_lookup=None):
         self.timeout = timeout
+        self.token_lookup = token_lookup
 
-    def send(self, msg: NtfyMessage) -> bool:  # pragma: no cover - needs network
+    def send(self, msg: NtfyMessage) -> bool:
         import urllib.request
 
         url = f"{msg.server.rstrip('/')}/{msg.topic}"
@@ -78,7 +83,8 @@ class HttpNtfySink(NtfySink):
             headers["Actions"] = "; ".join(msg.actions)
         if msg.markdown:
             headers["Markdown"] = "yes"
-        token = os.environ.get(msg.token_ref) if msg.token_ref else None
+        token = (self.token_lookup(msg.token_ref)
+                 if msg.token_ref and self.token_lookup else None)
         if token:
             headers["Authorization"] = f"Bearer {token}"
         req = urllib.request.Request(

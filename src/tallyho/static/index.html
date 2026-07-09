@@ -88,13 +88,12 @@
         <label>Radius (km)<input id="f-radius" type="number" step="any" min="0" required placeholder="30" /></label>
         <label>ntfy server<input id="f-server" value="https://ntfy.sh" /></label>
         <label>ntfy topic<input id="f-topic" placeholder="my-sondes-7a3f" /></label>
-        <label>Token env-var name (optional)
-          <input id="f-token" placeholder="NTFY_HOME" /></label>
+        <label>ntfy token (optional)
+          <select id="f-token"><option value="">none (public topic)</option></select></label>
         <p class="hint"><b>Leave the topic blank for a watch-only location</b> - it's tracked and shown on
           the map (and widens the capture area) but never sends an ntfy alert, so you can run without ntfy.</p>
-        <p class="hint">Public ntfy topics need no token - leave it blank. For a private topic, enter the
-          <b>name of the environment variable</b> holding the token (e.g. <code>NTFY_HOME</code>) and set
-          that variable in the daemon's environment. Never paste the token itself.</p>
+        <p class="hint">Public ntfy topics need no token. For a private topic, pick a saved token -
+          add one in the <b>ntfy tokens</b> panel below.</p>
         <p class="hint">Once the <b>server</b> and <b>topic</b> are filled, <b>Test ntfy</b> unlocks - click it to send
           this exact server/topic a sample alert and confirm it reaches your device before saving.</p>
         <p class="hint">Tip: click <b>📍 Pick on map</b>, then click the map to drop a pin (drag it to
@@ -109,10 +108,30 @@
       </form>
       <table style="margin-top:14px">
         <thead><tr>
-          <th>Name</th><th>Lat, Lon</th><th>Radius</th><th>ntfy</th><th>Token ref</th>
+          <th>Name</th><th>Lat, Lon</th><th>Radius</th><th>ntfy</th><th>Token</th>
           <th>Active</th><th></th>
         </tr></thead>
         <tbody id="subs"></tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>ntfy tokens</h2>
+      <p class="hint" style="margin:2px 0 10px">Bearer tokens for <b>private</b> ntfy topics, referenced by
+        name from watched locations. Tokens are write-only: once saved, only the name and the last 4
+        characters are ever shown. Saving under an existing name replaces its token.</p>
+      <form id="tok-form" autocomplete="off">
+        <label>Name<input id="t-name" required maxlength="64" pattern="[A-Za-z0-9_.\-]+"
+          title="letters, digits, _ . -" placeholder="home" /></label>
+        <label>Token<input id="t-value" type="password" required autocomplete="new-password"
+          placeholder="tk_…" /></label>
+        <div class="form-actions"><button type="submit">Save token</button></div>
+      </form>
+      <table style="margin-top:14px">
+        <thead><tr>
+          <th>Name</th><th>Token</th><th>Used by</th><th>Last set</th><th></th>
+        </tr></thead>
+        <tbody id="tokens"></tbody>
       </table>
     </section>
   </main>

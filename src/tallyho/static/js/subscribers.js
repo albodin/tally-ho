@@ -2,6 +2,7 @@
 // pin + radius preview, test-ntfy, and the table's row actions.
 import { $, api, cssVar, status } from "./util.js";
 import { map } from "./map.js";
+import { setTokenSelect } from "./tokens.js";
 
 // own layer - refreshMap never clears it, so the draft survives map rebuilds
 const draftLayer = L.layerGroup().addTo(map);
@@ -32,7 +33,7 @@ function setPicking(on) {
 function fillForm(s) {
   $("f-id").value = s.id; $("f-name").value = s.name; $("f-lat").value = s.lat;
   $("f-lon").value = s.lon; $("f-radius").value = s.radius_km; $("f-server").value = s.ntfy_server;
-  $("f-topic").value = s.ntfy_topic; $("f-token").value = s.ntfy_token_ref || "";
+  $("f-topic").value = s.ntfy_topic; setTokenSelect(s.ntfy_token_ref || "");
   $("f-submit").textContent = "Save changes"; $("f-cancel").style.display = "";
   setPicking(false); drawDraft(s.lat, s.lon); updateTestBtn();
   map.setView([s.lat, s.lon], Math.max(map.getZoom(), 9));
@@ -40,6 +41,7 @@ function fillForm(s) {
 }
 function resetForm() {
   $("sub-form").reset(); $("f-id").value = ""; $("f-server").value = "https://ntfy.sh";
+  setTokenSelect("");
   $("f-submit").textContent = "Add location"; $("f-cancel").style.display = "none";
   clearDraft(); setPicking(false); updateTestBtn();
 }

@@ -50,7 +50,7 @@ class Subscriber:
     radius_km: float
     ntfy_server: str
     ntfy_topic: str
-    ntfy_token_ref: str | None = None   # ENV var name holding the token, not the token
+    ntfy_token_ref: str | None = None   # name of a saved ntfy token, not the token
     active: bool = True
     id: int | None = None
     created_at: datetime | None = None
