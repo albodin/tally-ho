@@ -32,6 +32,7 @@ import re
 import secrets
 from datetime import date, datetime, timezone
 from pathlib import Path
+from typing import Literal
 
 from windfall.geo import haversine_km
 
@@ -93,6 +94,7 @@ def _serialize_subscriber(s: Subscriber) -> dict:
         "ntfy_server": s.ntfy_server,
         "ntfy_topic": s.ntfy_topic,
         "ntfy_token_ref": s.ntfy_token_ref,
+        "units": s.units,
         "notify": s.notify_enabled,
         "active": s.active,
         "created_at": s.created_at.isoformat() if s.created_at else None,
@@ -133,6 +135,7 @@ def create_app(cfg: Config, store: Store, ntfy_sink=None):
         ntfy_topic: str = ""
         # NAME of a saved ntfy token (see /api/tokens), never the token itself
         ntfy_token_ref: str | None = None
+        units: Literal["metric", "imperial"] = "metric"
         active: bool = True
 
     class ActiveIn(BaseModel):
@@ -153,7 +156,7 @@ def create_app(cfg: Config, store: Store, ntfy_sink=None):
         return Subscriber(
             id=sub_id, name=p.name, lat=p.lat, lon=p.lon, radius_km=p.radius_km,
             ntfy_server=p.ntfy_server, ntfy_topic=p.ntfy_topic,
-            ntfy_token_ref=p.ntfy_token_ref or None, active=p.active,
+            ntfy_token_ref=p.ntfy_token_ref or None, units=p.units, active=p.active,
         )
 
     app = FastAPI(title="tally-ho", docs_url="/api/docs", openapi_url="/api/openapi.json")

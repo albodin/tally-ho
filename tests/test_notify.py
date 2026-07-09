@@ -79,6 +79,39 @@ def test_eta_rendered_in_display_tz(store, monkeypatch):
     assert "ETA 08:20:00 EDT" in body  # 12:20 UTC -> 08:20 EDT
 
 
+def test_units_formatting(store):
+    """Per-subscriber units: metric renders km/m, imperial renders mi/ft -
+    same alerts, same internal km, only the strings differ."""
+    metric = _sub(store)  # alice, metric default
+    sid = store.add_subscriber(Subscriber(
+        name="carol", lat=45.0, lon=7.0, radius_km=30.0,
+        ntfy_server="https://ntfy.sh", ntfy_topic="carol-sondes", units="imperial"))
+    subs = [metric, store.get_subscriber(sid)]
+    mgr = AlertManager(Config(), store, FakeNtfySink())
+
+    # INBOUND: landing 45.04,7.0 is ~4.4 km / 2.8 mi due N; uncertainty 2.0 km
+    sent = {s.topic: s for s in mgr.handle_prediction(_flight(), _pred(radius=2.0),
+                                                      subs, now=T0)}
+    km_msg, mi_msg = sent["alice-sondes"], sent["carol-sondes"]
+    assert "4.4 km N" in km_msg.title and "±2.0 km" in km_msg.body
+    assert "2.8 mi N" in mi_msg.title and "±1.2 mi" in mi_msg.body
+    assert "km" not in mi_msg.title and "km" not in mi_msg.body
+
+    # UPDATE: landing moves ~7.8 km / 4.8 mi north
+    upd = {s.topic: s for s in mgr.handle_prediction(
+        _flight(), _pred(lat=45.11, radius=2.0), subs, now=T0 + timedelta(minutes=11))}
+    assert "Moved 7.8 km since last alert." in upd["alice-sondes"].body
+    assert "Moved 4.8 mi since last alert." in upd["carol-sondes"].body
+
+    # LANDED: ~2.2 km / 1.4 mi away, altitude 210 m / 689 ft
+    flight = _flight(state=FlightState.LANDED, lat=45.02, lon=7.0, alt=210.0)
+    landed = {s.topic: s for s in mgr.handle_landed(flight, subs, now=T0)}
+    assert "LANDED 2.2 km away" in landed["alice-sondes"].title
+    assert "alt 210 m" in landed["alice-sondes"].body
+    assert "LANDED 1.4 mi away" in landed["carol-sondes"].title
+    assert "alt 689 ft" in landed["carol-sondes"].body
+
+
 def test_inbound_gated_on_descent(store):
     subs = [_sub(store)]
     mgr = AlertManager(Config(), store, FakeNtfySink())

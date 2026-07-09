@@ -25,6 +25,17 @@ from .store import Store
 
 log = logging.getLogger(__name__)
 
+_KM_PER_MI = 1.609344
+_M_PER_FT = 0.3048
+
+
+def _dist(km: float, units: str) -> str:
+    return f"{km / _KM_PER_MI:.1f} mi" if units == "imperial" else f"{km:.1f} km"
+
+
+def _alt(m: float, units: str) -> str:
+    return f"{m / _M_PER_FT:.0f} ft" if units == "imperial" else f"{m:.0f} m"
+
 
 @dataclass(slots=True)
 class NtfyMessage:
@@ -197,7 +208,8 @@ class AlertManager:
     # ---- message formatting ----------------------------------
     def _inbound_msg(self, flight, prediction: Prediction, m: Match) -> NtfyMessage:
         sub = m.subscriber
-        title = f"Tally-ho: {flight.type or 'sonde'} inbound {m.distance_km:.1f} km {m.compass}"
+        title = (f"Tally-ho: {flight.type or 'sonde'} inbound "
+                 f"{_dist(m.distance_km, sub.units)} {m.compass}")
         body = self._body(flight, prediction, m)
         return NtfyMessage(
             server=sub.ntfy_server, topic=sub.ntfy_topic, title=title, body=body,
@@ -209,8 +221,10 @@ class AlertManager:
 
     def _update_msg(self, flight, prediction: Prediction, m: Match, moved: float) -> NtfyMessage:
         sub = m.subscriber
-        title = f"Tally-ho: {flight.type or 'sonde'} update {m.distance_km:.1f} km {m.compass}"
-        body = self._body(flight, prediction, m) + f"\nMoved {moved:.1f} km since last alert."
+        title = (f"Tally-ho: {flight.type or 'sonde'} update "
+                 f"{_dist(m.distance_km, sub.units)} {m.compass}")
+        body = (self._body(flight, prediction, m)
+                + f"\nMoved {_dist(moved, sub.units)} since last alert.")
         return NtfyMessage(
             server=sub.ntfy_server, topic=sub.ntfy_topic, title=title, body=body,
             priority=3, tags=["balloon", "arrows_counterclockwise"],
@@ -220,11 +234,13 @@ class AlertManager:
         )
 
     def _landed_msg(self, flight, sub: Subscriber, distance_km: float) -> NtfyMessage:
-        title = f"Tally-ho: {flight.type or 'sonde'} LANDED {distance_km:.1f} km away"
+        title = (f"Tally-ho: {flight.type or 'sonde'} LANDED "
+                 f"{_dist(distance_km, sub.units)} away")
         body = (
             f"**{flight.serial}** ({flight.type or '?'}) last seen at "
-            f"{flight.last_lat:.5f}, {flight.last_lon:.5f}, alt {flight.last_alt:.0f} m.\n"
-            f"Distance from you: {distance_km:.1f} km."
+            f"{flight.last_lat:.5f}, {flight.last_lon:.5f}, "
+            f"alt {_alt(flight.last_alt, sub.units)}.\n"
+            f"Distance from you: {_dist(distance_km, sub.units)}."
         )
         return NtfyMessage(
             server=sub.ntfy_server, topic=sub.ntfy_topic, title=title, body=body,
@@ -236,11 +252,13 @@ class AlertManager:
 
     def _body(self, flight, prediction: Prediction, m: Match) -> str:
         eta = prediction.land_eta.astimezone(self._tz).strftime("%H:%M:%S %Z")
+        units = m.subscriber.units
         return (
             f"**{flight.serial}** ({flight.type or '?'}) predicted landing\n"
             f"{prediction.land_lat:.5f}, {prediction.land_lon:.5f}\n"
-            f"ETA {eta} · {m.distance_km:.1f} km {m.compass} of you\n"
-            f"uncertainty ±{prediction.uncertainty_radius_km:.1f} km · source {prediction.source.value}"
+            f"ETA {eta} · {_dist(m.distance_km, units)} {m.compass} of you\n"
+            f"uncertainty ±{_dist(prediction.uncertainty_radius_km, units)} "
+            f"· source {prediction.source.value}"
         )
 
     def _map_url(self, lat: float, lon: float) -> str:

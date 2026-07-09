@@ -34,6 +34,7 @@ function fillForm(s) {
   $("f-id").value = s.id; $("f-name").value = s.name; $("f-lat").value = s.lat;
   $("f-lon").value = s.lon; $("f-radius").value = s.radius_km; $("f-server").value = s.ntfy_server;
   $("f-topic").value = s.ntfy_topic; setTokenSelect(s.ntfy_token_ref || "");
+  $("f-units").value = s.units || "metric";
   $("f-submit").textContent = "Save changes"; $("f-cancel").style.display = "";
   setPicking(false); drawDraft(s.lat, s.lon); updateTestBtn();
   map.setView([s.lat, s.lon], Math.max(map.getZoom(), 9));
@@ -107,6 +108,7 @@ export function initSubscribers(refreshAll) {
       ntfy_server: $("f-server").value.trim(),
       ntfy_topic: $("f-topic").value.trim(),
       ntfy_token_ref: $("f-token").value.trim() || null,
+      units: $("f-units").value,
       active: true,
     };
     try {

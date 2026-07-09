@@ -27,6 +27,7 @@ def test_subscriber_crud(store):
     assert subs[0].name == "alice"
     assert subs[0].id == sid
     assert subs[0].ntfy_token_ref == "NTFY_ALICE"  # reference, not a token
+    assert subs[0].units == "metric"               # default display units
     store.set_subscriber_active(sid, False)
     assert store.list_subscribers(active_only=True) == []
     assert len(store.list_subscribers(active_only=False)) == 1
@@ -43,12 +44,13 @@ def test_subscriber_update_get_delete(store):
     ok = store.update_subscriber(Subscriber(
         id=sid, name="alice2", lat=46.0, lon=8.0, radius_km=40,
         ntfy_server="https://ntfy.example", ntfy_topic="alice-2",
-        ntfy_token_ref="NTFY_ALICE", active=False,
+        ntfy_token_ref="NTFY_ALICE", units="imperial", active=False,
     ))
     assert ok is True
     got = store.get_subscriber(sid)
     assert got.name == "alice2" and got.radius_km == 40 and got.active is False
     assert got.ntfy_token_ref == "NTFY_ALICE"
+    assert got.units == "imperial"
     assert got.created_at == created.created_at   # update leaves created_at intact
 
     # updating / deleting a missing id reports False
@@ -187,6 +189,32 @@ def test_migrates_predictions_alt_at_pred_column(tmp_path):
             source=PredictionSource.MEASURED, uncertainty_radius_km=2.0,
             alt_at_pred=8000.0))
         assert store.latest_prediction("M1", date(2026, 6, 7))["alt_at_pred"] == 8000.0
+    finally:
+        store.close()
+
+
+def test_migrates_subscribers_units_column(tmp_path):
+    import sqlite3
+    db = tmp_path / "legacy.db"
+    # Simulate a pre-migration DB: subscribers table without units.
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE subscribers (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "name TEXT NOT NULL, lat REAL NOT NULL, lon REAL NOT NULL, "
+        "radius_km REAL NOT NULL, ntfy_server TEXT NOT NULL, "
+        "ntfy_topic TEXT NOT NULL, ntfy_token_ref TEXT, "
+        "active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL)")
+    conn.execute(
+        "INSERT INTO subscribers (name, lat, lon, radius_km, ntfy_server, ntfy_topic, "
+        "created_at) VALUES ('old', 45.0, 7.0, 30, 'https://ntfy.sh', 'old-sondes', "
+        "'2026-06-07T00:00:00+00:00')")
+    conn.commit()
+    conn.close()
+
+    store = Store(db)  # opening must add the missing column (idempotent)
+    try:
+        # pre-existing rows come back with the metric default
+        assert store.list_subscribers()[0].units == "metric"
     finally:
         store.close()
 

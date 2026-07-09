@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS subscribers (
     ntfy_server   TEXT NOT NULL,
     ntfy_topic    TEXT NOT NULL,
     ntfy_token_ref TEXT,
+    units         TEXT NOT NULL DEFAULT 'metric',
     active        INTEGER NOT NULL DEFAULT 1,
     created_at    TEXT NOT NULL
 );
@@ -213,6 +214,10 @@ class Store:
         if "burst_t" not in fcols:
             # sonde time at burst - anchors the descent-fit transient exclusion
             self._conn.execute("ALTER TABLE flights ADD COLUMN burst_t REAL")
+        scols = {r["name"] for r in self._conn.execute("PRAGMA table_info(subscribers)")}
+        if "units" not in scols:
+            self._conn.execute(
+                "ALTER TABLE subscribers ADD COLUMN units TEXT NOT NULL DEFAULT 'metric'")
 
     def close(self) -> None:
         with self._lock:
@@ -517,10 +522,11 @@ class Store:
         with self._lock:
             cur = self._conn.execute(
                 "INSERT INTO subscribers (name, lat, lon, radius_km, ntfy_server, "
-                "ntfy_topic, ntfy_token_ref, active, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "ntfy_topic, ntfy_token_ref, units, active, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (sub.name, sub.lat, sub.lon, sub.radius_km, sub.ntfy_server,
-                 sub.ntfy_topic, sub.ntfy_token_ref, int(sub.active), created.isoformat()),
+                 sub.ntfy_topic, sub.ntfy_token_ref, sub.units, int(sub.active),
+                 created.isoformat()),
             )
             self._conn.commit()
             return int(cur.lastrowid)
@@ -554,9 +560,9 @@ class Store:
         with self._lock:
             cur = self._conn.execute(
                 "UPDATE subscribers SET name=?, lat=?, lon=?, radius_km=?, "
-                "ntfy_server=?, ntfy_topic=?, ntfy_token_ref=?, active=? WHERE id=?",
+                "ntfy_server=?, ntfy_topic=?, ntfy_token_ref=?, units=?, active=? WHERE id=?",
                 (sub.name, sub.lat, sub.lon, sub.radius_km, sub.ntfy_server,
-                 sub.ntfy_topic, sub.ntfy_token_ref, int(sub.active), sub.id),
+                 sub.ntfy_topic, sub.ntfy_token_ref, sub.units, int(sub.active), sub.id),
             )
             self._conn.commit()
             return cur.rowcount > 0
@@ -573,7 +579,7 @@ class Store:
             id=r["id"], name=r["name"], lat=r["lat"], lon=r["lon"],
             radius_km=r["radius_km"], ntfy_server=r["ntfy_server"],
             ntfy_topic=r["ntfy_topic"], ntfy_token_ref=r["ntfy_token_ref"],
-            active=bool(r["active"]), created_at=_dt(r["created_at"]),
+            units=r["units"], active=bool(r["active"]), created_at=_dt(r["created_at"]),
         )
 
     # ---- alert de-dup ----------------------------------------

@@ -51,6 +51,7 @@ class Subscriber:
     ntfy_server: str
     ntfy_topic: str
     ntfy_token_ref: str | None = None   # name of a saved ntfy token, not the token
+    units: str = "metric"               # alert display units: "metric" (km/m) or "imperial" (mi/ft)
     active: bool = True
     id: int | None = None
     created_at: datetime | None = None

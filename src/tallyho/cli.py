@@ -53,6 +53,8 @@ def main(argv: list[str] | None = None) -> int:
     add.add_argument("--token-ref", default=None,
                      help="NAME of a saved ntfy token ('tallyho token set NAME'), "
                           "never the token itself")
+    add.add_argument("--units", choices=("metric", "imperial"), default="metric",
+                     help="alert display units: metric (km/m) or imperial (mi/ft)")
     ssub.add_parser("list")
     deact = ssub.add_parser("deactivate")
     deact.add_argument("--id", type=int, required=True)
@@ -173,7 +175,7 @@ def _cmd_subscriber(cfg, args) -> int:
             sid = store.add_subscriber(Subscriber(
                 name=args.name, lat=args.lat, lon=args.lon, radius_km=args.radius,
                 ntfy_server=args.ntfy_server, ntfy_topic=args.ntfy_topic,
-                ntfy_token_ref=args.token_ref))
+                ntfy_token_ref=args.token_ref, units=args.units))
             print(f"added subscriber id={sid}")
         elif args.subcmd == "list":
             for s in store.list_subscribers(active_only=False):

@@ -175,12 +175,15 @@ def test_subscriber_crud_roundtrip(client):
     assert r.status_code == 201
     sid = r.json()["id"]
     assert r.json()["ntfy_token_ref"] == "NTFY_HOME"  # a token name, not a token
+    assert r.json()["units"] == "metric"              # default when omitted
 
     assert client.get(f"/api/subscribers/{sid}").json()["name"] == "home"
     assert len(client.get("/api/subscribers").json()) == 1
 
-    r = client.put(f"/api/subscribers/{sid}", json=_payload(name="home2", radius_km=42.0))
+    r = client.put(f"/api/subscribers/{sid}",
+                   json=_payload(name="home2", radius_km=42.0, units="imperial"))
     assert r.status_code == 200 and r.json()["radius_km"] == 42.0
+    assert r.json()["units"] == "imperial"
 
     r = client.post(f"/api/subscribers/{sid}/active", json={"active": False})
     assert r.status_code == 200 and r.json()["active"] is False
@@ -222,7 +225,7 @@ def test_token_ref_is_stored_but_no_token_field_leaks(client):
 # ---- validation ----------------------------------------------------------
 @pytest.mark.parametrize("over", [
     {"lat": 200}, {"lon": -999}, {"radius_km": -1}, {"radius_km": 0},
-    {"name": ""},
+    {"name": ""}, {"units": "furlongs"},
 ])
 def test_validation_rejects_bad_input(client, over):
     assert client.post("/api/subscribers", json=_payload(**over)).status_code == 422
