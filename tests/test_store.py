@@ -315,6 +315,28 @@ def test_clear_alerts_keeps_airborne_dedup_rows(store):
                               land_lat=45.5, land_lon=7.5, sent_at=sent) is False
 
 
+def test_climatology_like_escapes_wildcards(store):
+    """Sonde types come from external telemetry, so LIKE metacharacters in them
+    must match literally - a spoofed type of '%' or '_' must not broaden the
+    climatology scans to other families."""
+    day = "2026-06-07"
+    for serial, stype, burst, b in [("W1", "RS41", 30000.0, 0.02),
+                                    ("W2", "DFM09", 26000.0, 0.05)]:
+        store.upsert_flight({
+            "serial": serial, "launch_day": day, "type": stype, "state": "LANDED",
+            "launch_lat": 45.0, "launch_lon": 7.0, "burst_alt": burst,
+            "descent_b": b, "max_alt": burst,
+            "last_lat": 45.2, "last_lon": 7.2, "last_alt": 200.0,
+        })
+    # wildcards match nothing (no type literally starts with '%' or '_FM09')
+    assert store.site_burst_alts(45.0, 7.0, sonde_type="%") == []
+    assert store.type_descent_bs("%") == []
+    assert store.type_descent_bs("_FM09") == []
+    # legitimate prefixes still match their family
+    assert store.site_burst_alts(45.0, 7.0, sonde_type="RS41-SGP") == [30000.0]
+    assert store.type_descent_bs("DFM") == [0.05]
+
+
 def test_flown_track_append_and_query(store):
     day = date(2026, 6, 7)
     pts = [(100.0, 45.0, 7.0, 200.0), (130.0, 45.1, 7.1, 5000.0),

@@ -152,6 +152,14 @@ CREATE TABLE IF NOT EXISTS kv (
 """
 
 
+def _like_prefix(prefix: str) -> str:
+    """``prefix%`` with LIKE metacharacters escaped (pair with ``ESCAPE '\\\\'``).
+    Sonde types arrive from external telemetry, so a stray ``%``/``_`` must
+    match literally rather than broaden the climatology scans."""
+    escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return escaped + "%"
+
+
 def _iso(dt: datetime | None) -> str | None:
     return dt.isoformat() if dt is not None else None
 
@@ -255,8 +263,8 @@ class Store:
         )
         args: list = [lat - box_deg, lat + box_deg, lon - box_deg, lon + box_deg]
         if sonde_type:
-            sql += " AND type LIKE ?"
-            args.append(sonde_type.split("-")[0] + "%")
+            sql += " AND type LIKE ? ESCAPE '\\'"
+            args.append(_like_prefix(sonde_type.split("-")[0]))
         sql += " ORDER BY launch_day DESC, last_seen DESC LIMIT ?"
         args.append(int(limit))
         with self._lock:
@@ -268,8 +276,9 @@ class Store:
         with self._lock:
             cur = self._conn.execute(
                 "SELECT descent_b FROM flights WHERE descent_b IS NOT NULL "
-                "AND type LIKE ? ORDER BY launch_day DESC, last_seen DESC LIMIT ?",
-                (family + "%", int(limit)),
+                "AND type LIKE ? ESCAPE '\\' "
+                "ORDER BY launch_day DESC, last_seen DESC LIMIT ?",
+                (_like_prefix(family), int(limit)),
             )
             return [r["descent_b"] for r in cur.fetchall()]
 
