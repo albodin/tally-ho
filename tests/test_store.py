@@ -5,6 +5,7 @@ from datetime import date, datetime, timezone
 
 import pytest
 
+import tallyho.store
 from tallyho.models import AlertType, Prediction, PredictionSource, Subscriber
 from tallyho.store import Store
 
@@ -164,59 +165,71 @@ def test_prediction_save_latest(store):
     assert latest["land_lat"] == 45.6
 
 
-def test_migrates_predictions_alt_at_pred_column(tmp_path):
-    import sqlite3
-    db = tmp_path / "legacy.db"
-    # Simulate a pre-migration DB: predictions table without alt_at_pred.
-    conn = sqlite3.connect(db)
-    conn.execute(
-        "CREATE TABLE predictions (serial TEXT, launch_day TEXT, predicted_at TEXT, "
-        "land_lat REAL, land_lon REAL, land_eta TEXT, source TEXT, "
-        "uncertainty_radius_km REAL)")
-    conn.commit()
-    conn.close()
-
-    store = Store(db)  # opening must add the missing column (idempotent)
+def test_fresh_db_stamped_with_current_schema_version(tmp_path):
+    s = Store(tmp_path / "new.db")
     try:
-        cols = {r["name"] for r in store._conn.execute("PRAGMA table_info(predictions)")}
-        assert "alt_at_pred" in cols
-        # and saving a prediction with the new field works against the migrated table
-        store.save_prediction(Prediction(
-            serial="M1", launch_day=date(2026, 6, 7),
-            predicted_at=datetime(2026, 6, 7, 0, 11, tzinfo=timezone.utc),
-            land_lat=45.5, land_lon=7.6,
-            land_eta=datetime(2026, 6, 7, 0, 40, tzinfo=timezone.utc),
-            source=PredictionSource.MEASURED, uncertainty_radius_km=2.0,
-            alt_at_pred=8000.0))
-        assert store.latest_prediction("M1", date(2026, 6, 7))["alt_at_pred"] == 8000.0
+        v = s._conn.execute("PRAGMA user_version").fetchone()[0]
+        assert v == tallyho.store._SCHEMA_VERSION
     finally:
-        store.close()
+        s.close()
 
 
-def test_migrates_subscribers_units_column(tmp_path):
-    import sqlite3
+def test_pre_versioning_db_adopted_as_baseline(tmp_path):
+    # A DB shaped like the current schema but never stamped (user_version 0)
+    # must be adopted in place, keeping its data.
     db = tmp_path / "legacy.db"
-    # Simulate a pre-migration DB: subscribers table without units.
-    conn = sqlite3.connect(db)
-    conn.execute(
-        "CREATE TABLE subscribers (id INTEGER PRIMARY KEY AUTOINCREMENT, "
-        "name TEXT NOT NULL, lat REAL NOT NULL, lon REAL NOT NULL, "
-        "radius_km REAL NOT NULL, ntfy_server TEXT NOT NULL, "
-        "ntfy_topic TEXT NOT NULL, ntfy_token_ref TEXT, "
-        "active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL)")
-    conn.execute(
-        "INSERT INTO subscribers (name, lat, lon, radius_km, ntfy_server, ntfy_topic, "
-        "created_at) VALUES ('old', 45.0, 7.0, 30, 'https://ntfy.sh', 'old-sondes', "
-        "'2026-06-07T00:00:00+00:00')")
-    conn.commit()
-    conn.close()
+    s = Store(db)
+    s.add_subscriber(Subscriber(
+        name="old", lat=45.0, lon=7.0, radius_km=30,
+        ntfy_server="https://ntfy.sh", ntfy_topic="old-sondes"))
+    s._conn.execute("PRAGMA user_version = 0")
+    s._conn.commit()
+    s.close()
 
-    store = Store(db)  # opening must add the missing column (idempotent)
+    s = Store(db)
     try:
-        # pre-existing rows come back with the metric default
-        assert store.list_subscribers()[0].units == "metric"
+        assert s._conn.execute("PRAGMA user_version").fetchone()[0] \
+            == tallyho.store._SCHEMA_VERSION
+        assert s.list_subscribers()[0].name == "old"
     finally:
-        store.close()
+        s.close()
+
+
+def test_pending_migrations_replay_in_order(tmp_path, monkeypatch):
+    db = tmp_path / "t.db"
+    Store(db).close()  # created at the current version
+
+    # Pretend the app has since moved two versions ahead: one SQL migration,
+    # one Python callable.
+    base = tallyho.store._SCHEMA_VERSION
+
+    def add_mig_b(conn):
+        conn.execute("CREATE TABLE mig_b (x)")
+
+    monkeypatch.setattr(tallyho.store, "_SCHEMA_VERSION", base + 2)
+    monkeypatch.setattr(tallyho.store, "_MIGRATIONS", {
+        base + 1: "CREATE TABLE mig_a (x)",
+        base + 2: add_mig_b,
+    })
+    s = Store(db)
+    try:
+        tables = {r["name"] for r in s._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        assert {"mig_a", "mig_b"} <= tables
+        assert s._conn.execute("PRAGMA user_version").fetchone()[0] == base + 2
+    finally:
+        s.close()
+
+
+def test_db_from_newer_build_refused(tmp_path):
+    import sqlite3
+    db = tmp_path / "t.db"
+    Store(db).close()
+    conn = sqlite3.connect(db)
+    conn.execute("PRAGMA user_version = 9999")
+    conn.close()
+    with pytest.raises(RuntimeError, match="schema version 9999"):
+        Store(db)
 
 
 def test_prediction_path_saved_and_excludes_landed(store):

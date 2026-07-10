@@ -17,7 +17,7 @@ import sqlite3
 import threading
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Iterable
+from typing import Callable
 
 from .models import AlertType, Prediction, Subscriber
 
@@ -161,6 +161,17 @@ CREATE TABLE IF NOT EXISTS kv (
 );
 """
 
+# The schema version of a database file lives in ``PRAGMA user_version``.
+# To change the schema: bump _SCHEMA_VERSION, edit _SCHEMA (fresh databases
+# get the latest shape directly), and register the same change in _MIGRATIONS
+# (existing databases replay it). A migration is the SQL upgrading from the
+# previous version, or a callable taking the connection when it needs Python
+# (data backfills, table rebuilds).
+_SCHEMA_VERSION = 1
+_MIGRATIONS: dict[int, str | Callable[[sqlite3.Connection], None]] = {
+    # 2: "ALTER TABLE flights ADD COLUMN example REAL",
+}
+
 
 def _like_prefix(prefix: str) -> str:
     """``prefix%`` with LIKE metacharacters escaped (pair with ``ESCAPE '\\\\'``).
@@ -196,28 +207,31 @@ class Store:
         # briefly on a transient writer lock instead of raising "database is locked".
         self._conn.execute("PRAGMA busy_timeout=5000")
         with self._lock:
-            self._conn.executescript(_SCHEMA)
-            self._migrate()
-            self._conn.commit()
+            self._apply_schema()
 
-    def _migrate(self) -> None:
-        """Add columns introduced after the initial schema to pre-existing DBs.
-        ``CREATE TABLE IF NOT EXISTS`` never alters an existing table, so older
-        databases need their new columns added explicitly (idempotent)."""
-        cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(predictions)")}
-        if "alt_at_pred" not in cols:
-            self._conn.execute("ALTER TABLE predictions ADD COLUMN alt_at_pred REAL")
-        fcols = {r["name"] for r in self._conn.execute("PRAGMA table_info(flights)")}
-        if "descent_b" not in fcols:
-            # ballistic constant fitted at landing - feeds the per-type prior
-            self._conn.execute("ALTER TABLE flights ADD COLUMN descent_b REAL")
-        if "burst_t" not in fcols:
-            # sonde time at burst - anchors the descent-fit transient exclusion
-            self._conn.execute("ALTER TABLE flights ADD COLUMN burst_t REAL")
-        scols = {r["name"] for r in self._conn.execute("PRAGMA table_info(subscribers)")}
-        if "units" not in scols:
-            self._conn.execute(
-                "ALTER TABLE subscribers ADD COLUMN units TEXT NOT NULL DEFAULT 'metric'")
+    def _apply_schema(self) -> None:
+        """Create or upgrade the schema, one version at a time. Version 0 means
+        a fresh file - or one from before versioning, whose shape already
+        matches the v1 baseline - so it gets _SCHEMA (all IF NOT EXISTS) and is
+        stamped current. The stamp advances per migration, so a failure partway
+        resumes from the last completed step on the next open."""
+        v = self._conn.execute("PRAGMA user_version").fetchone()[0]
+        if v > _SCHEMA_VERSION:
+            raise RuntimeError(
+                f"{self.path} has schema version {v}, newer than this build's "
+                f"{_SCHEMA_VERSION} - upgrade tally-ho or restore the matching database")
+        if v == 0:
+            self._conn.executescript(_SCHEMA)
+            v = _SCHEMA_VERSION
+        for n in range(v + 1, _SCHEMA_VERSION + 1):
+            step = _MIGRATIONS[n]
+            if callable(step):
+                step(self._conn)
+            else:
+                self._conn.executescript(step)
+            self._conn.execute(f"PRAGMA user_version = {n}")
+        self._conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
+        self._conn.commit()
 
     def close(self) -> None:
         with self._lock:
