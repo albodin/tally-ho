@@ -83,7 +83,11 @@ def test_wizard_health_reports_setup(wizard):
 
 
 def test_wizard_serves_page_everywhere(wizard):
-    assert "setup" in wizard.get("/").text.lower()
+    r = wizard.get("/")
+    assert "setup" in r.text.lower()
+    # no-store: after the handover "/" serves the dashboard, and a heuristically
+    # cached wizard page would keep showing until a forced reload
+    assert r.headers["cache-control"] == "no-store"
     r = wizard.get("/anything/else", follow_redirects=False)
     assert r.status_code == 307 or r.status_code == 302 or r.status_code == 200
 

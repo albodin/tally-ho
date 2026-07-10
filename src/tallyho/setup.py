@@ -103,7 +103,8 @@ def create_setup_app(cfg: Config, store: Store, config_path: str | Path,
 
     @app.get("/", include_in_schema=False)
     def wizard():
-        return FileResponse(str(_SETUP_HTML), media_type="text/html")
+        return FileResponse(str(_SETUP_HTML), media_type="text/html",
+                            headers={"Cache-Control": "no-store"})
 
     @app.get("/api/health")
     def health():

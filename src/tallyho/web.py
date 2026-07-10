@@ -182,11 +182,13 @@ def create_app(cfg: Config, store: Store, ntfy_sink=None):
     # ---- pages + auth ------------------------------------------------------
     @app.get("/", include_in_schema=False)
     def index():
-        return FileResponse(str(_INDEX_HTML), media_type="text/html")
+        return FileResponse(str(_INDEX_HTML), media_type="text/html",
+                            headers={"Cache-Control": "no-store"})
 
     @app.get("/login", include_in_schema=False)
     def login_page():
-        return FileResponse(str(_LOGIN_HTML), media_type="text/html")
+        return FileResponse(str(_LOGIN_HTML), media_type="text/html",
+                            headers={"Cache-Control": "no-store"})
 
     @app.post("/api/login")
     def login(payload: LoginIn, request: Request):
