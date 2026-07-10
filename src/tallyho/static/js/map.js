@@ -9,7 +9,8 @@ import { api, cssVar, esc, fnum, hhmm } from "./util.js";
 export const map = L.map("map", { worldCopyJump: true, preferCanvas: true }).setView([20, 0], 2);
 L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
   maxZoom: 19, attribution: "© OpenStreetMap",
-  updateWhenZooming: false, keepBuffer: 4
+  updateWhenZooming: false, keepBuffer: 4,
+  referrerPolicy: "strict-origin-when-cross-origin"
 }).addTo(map);
 
 const launchLayer = L.layerGroup().addTo(map);
