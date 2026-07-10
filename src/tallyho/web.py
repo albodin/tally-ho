@@ -382,8 +382,13 @@ def create_app(cfg: Config, store: Store, ntfy_sink=None, bus=None):
                         headers=headers)
 
     @app.get("/api/alerts")
-    def alerts(limit: int = 100):
-        return store.recent_alerts(limit=limit)
+    def alerts(limit: int = 10, offset: int = 0):
+        """One page of sent alerts, newest first. ``items`` is the page;
+        ``total`` is the full unpaged count so the dashboard can render page
+        controls (the table grows without bound, so we ship a page at a time
+        rather than the whole history)."""
+        return {"items": store.recent_alerts(limit=limit, offset=offset),
+                "total": store.count_alerts(), "limit": limit, "offset": offset}
 
     @app.delete("/api/alerts")
     def clear_alerts():
@@ -482,19 +487,23 @@ def create_app(cfg: Config, store: Store, ntfy_sink=None, bus=None):
         return {"type": "FeatureCollection", "features": features}
 
     @app.get("/api/accuracy")
-    def accuracy(limit: int = 200):
-        """Score saved predictions against actual recorded landings.
-        Returns aggregate metrics plus a per-flight final-error list."""
+    def accuracy(limit: int = 10, offset: int = 0, window: int = 200):
+        """Score saved predictions against actual recorded landings. ``summary``
+        aggregates the whole scoring window (the most recent ``window`` scored
+        flights) so the headline stats stay stable as you page; ``flights`` is
+        one page of that window's per-flight final errors, newest first, with
+        ``total`` the full count so the dashboard can page it."""
         from windfall.replay import accuracy_from_store, aggregate
 
-        results = accuracy_from_store(store, limit=limit)
+        results = accuracy_from_store(store, limit=window)
         flights = [{
             "serial": r.serial, "launch_day": r.launch_day,
             "truth_lat": r.truth_lat, "truth_lon": r.truth_lon,
             "final_error_km": r.final_error_km, "n_predictions": r.n_predictions,
-        } for r in results]
+        } for r in results[offset:offset + limit]]
         return {"summary": _metrics_json(aggregate(results)) if results else None,
-                "flights": flights}
+                "flights": flights, "total": len(results),
+                "limit": limit, "offset": offset}
 
     @app.delete("/api/accuracy")
     def clear_accuracy():

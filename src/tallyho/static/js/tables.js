@@ -3,6 +3,30 @@
 // in history.js, subscriber buttons (data-act) in subscribers.js.
 import { $, api, esc, fnum, hhmm } from "./util.js";
 
+// The alerts + accuracy histories grow without bound, so they're paged server-
+// side (newest first). One page per fetch keeps the initial load small; the
+// current offset lives here so an SSE-driven refetch stays on the same page.
+const PAGE_SIZE = 10;
+
+// Render "‹ Newer  1-10 of 42  Older ›" into `el` and wire the buttons to
+// go(newOffset). Offset 0 is the newest row, so Prev walks toward it. Hidden
+// entirely while everything fits on one page.
+function renderPager(el, { offset, limit, total }, go) {
+  if (total <= limit) { el.innerHTML = ""; return; }
+  const from = offset + 1, to = Math.min(offset + limit, total);
+  el.innerHTML =
+    `<button class="tiny secondary" data-pg="prev" ${offset <= 0 ? "disabled" : ""}>‹ Newer</button>`
+    + `<span class="muted">${from}–${to} of ${total}</span>`
+    + `<button class="tiny secondary" data-pg="next" ${to >= total ? "disabled" : ""}>Older ›</button>`;
+  el.querySelector('[data-pg="prev"]').onclick = () => go(Math.max(0, offset - limit));
+  el.querySelector('[data-pg="next"]').onclick = () => go(offset + limit);
+}
+
+// Snap an offset back onto the last page when the history shrank under it
+// (rows aged out, or a "Clear history"); returns the clamped offset.
+const clampOffset = (offset, total) =>
+  total === 0 ? 0 : Math.min(offset, (Math.ceil(total / PAGE_SIZE) - 1) * PAGE_SIZE);
+
 export async function refreshFlights() {
   const rows = await api("/api/flights");
   const tb = $("flights");
@@ -25,11 +49,19 @@ export async function refreshFlights() {
   }).join("");
 }
 
+let alertsOffset = 0;
 export async function refreshAlerts() {
-  const rows = await api("/api/alerts");
+  const data = await api(`/api/alerts?limit=${PAGE_SIZE}&offset=${alertsOffset}`);
+  // If we're parked past the (now shorter) end, drop to the last page and refetch.
+  const clamped = clampOffset(alertsOffset, data.total);
+  if (clamped !== alertsOffset) { alertsOffset = clamped; return refreshAlerts(); }
   const tb = $("alerts");
-  if (!rows.length) { tb.innerHTML = `<tr><td colspan="6" class="empty">No alerts yet.</td></tr>`; return; }
-  tb.innerHTML = rows.map(a => `<tr>
+  if (!data.total) {
+    tb.innerHTML = `<tr><td colspan="6" class="empty">No alerts yet.</td></tr>`;
+    renderPager($("alerts-pager"), { offset: 0, limit: PAGE_SIZE, total: 0 });
+    return;
+  }
+  tb.innerHTML = data.items.map(a => `<tr>
     <td class="muted">${hhmm(a.sent_at)}</td>
     <td>${esc(a.alert_type)}</td>
     <td>${esc(a.subscriber_name||("#"+a.subscriber_id))}</td>
@@ -37,6 +69,8 @@ export async function refreshAlerts() {
     <td>${a.distance_km==null?"-":fnum(a.distance_km,1)+" km"}</td>
     <td>${a.land_lat==null?"-":fnum(a.land_lat,4)+", "+fnum(a.land_lon,4)}</td>
   </tr>`).join("");
+  renderPager($("alerts-pager"), { offset: alertsOffset, limit: PAGE_SIZE, total: data.total },
+              (o) => { alertsOffset = o; refreshAlerts(); });
 }
 
 export async function refreshSubs() {
@@ -58,8 +92,11 @@ export async function refreshSubs() {
   </tr>`).join("");
 }
 
+let accOffset = 0;
 export async function refreshAccuracy() {
-  const data = await api("/api/accuracy");
+  const data = await api(`/api/accuracy?limit=${PAGE_SIZE}&offset=${accOffset}`);
+  const clamped = clampOffset(accOffset, data.total);
+  if (clamped !== accOffset) { accOffset = clamped; return refreshAccuracy(); }
   const sum = data.summary, tb = $("accuracy");
   $("acc-summary").textContent = sum
     ? `mean final error ${fnum(sum.mean_final_error_km,2)} km · calibration `
@@ -78,8 +115,9 @@ export async function refreshAccuracy() {
     bkEl.innerHTML = chips.length
       ? "error by altitude-at-prediction - " + chips.join(" · ") : "";
   } else { bkEl.innerHTML = ""; }
-  if (!data.flights.length) {
+  if (!data.total) {
     tb.innerHTML = `<tr><td colspan="5" class="empty">No landings scored yet - predictions are scored once a sonde lands.</td></tr>`;
+    renderPager($("acc-pager"), { offset: 0, limit: PAGE_SIZE, total: 0 });
     return;
   }
   tb.innerHTML = data.flights.map(r => `<tr>
@@ -89,4 +127,6 @@ export async function refreshAccuracy() {
     <td class="muted">${r.n_predictions}</td>
     <td>${r.launch_day ? `<a href="#" data-hist data-serial="${esc(r.serial)}" data-day="${esc(r.launch_day)}">history</a>` : ""}</td>
   </tr>`).join("");
+  renderPager($("acc-pager"), { offset: accOffset, limit: PAGE_SIZE, total: data.total },
+              (o) => { accOffset = o; refreshAccuracy(); });
 }

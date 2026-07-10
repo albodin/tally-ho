@@ -426,7 +426,9 @@ def test_flights_endpoint_nests_prediction(client):
 
 def test_alerts_endpoint_joins_names(client):
     _seed_flight_pred_alert(client.store)
-    rows = client.get("/api/alerts").json()
+    body = client.get("/api/alerts").json()
+    assert body["total"] == 1
+    rows = body["items"]
     assert rows[0]["subscriber_name"] == "bob"
     assert rows[0]["flight_type"] == "RS41"
     assert rows[0]["alert_type"] == "INBOUND"
@@ -441,13 +443,35 @@ def test_alerts_clear_endpoint(client):
                        alert_type=AlertType.LANDED, distance_km=3.0,
                        land_lat=45.2, land_lon=7.2,
                        sent_at=datetime(2026, 6, 6, 0, 30, tzinfo=timezone.utc))
-    assert len(client.get("/api/alerts").json()) == 2
+    assert client.get("/api/alerts").json()["total"] == 2
 
     r = client.delete("/api/alerts")
     assert r.status_code == 200
     assert r.json() == {"deleted": 1}
     # the airborne flight's row is kept (it doubles as the de-dup record)
-    assert [a["serial"] for a in client.get("/api/alerts").json()] == ["S1"]
+    assert [a["serial"] for a in client.get("/api/alerts").json()["items"]] == ["S1"]
+
+
+def test_alerts_pagination(client):
+    store = client.store
+    day = date(2026, 6, 7)
+    # 12 alerts, each a minute apart so the newest-first order is deterministic
+    for i in range(12):
+        store.record_alert(
+            subscriber_id=1, serial=f"S{i:02d}", launch_day=day,
+            alert_type=AlertType.INBOUND, distance_km=float(i),
+            land_lat=45.0, land_lon=7.0,
+            sent_at=datetime(2026, 6, 7, 0, i, tzinfo=timezone.utc))
+
+    # Default page: 10 newest (S11 down to S02), total reports the full history.
+    page1 = client.get("/api/alerts").json()
+    assert page1["total"] == 12 and page1["limit"] == 10 and page1["offset"] == 0
+    assert [a["serial"] for a in page1["items"]] == [f"S{i:02d}" for i in range(11, 1, -1)]
+
+    # Second page: the 2 oldest, in the same newest-first order.
+    page2 = client.get("/api/alerts?limit=10&offset=10").json()
+    assert page2["offset"] == 10
+    assert [a["serial"] for a in page2["items"]] == ["S01", "S00"]
 
 
 def test_map_feature_collection(client):
@@ -559,6 +583,33 @@ def test_accuracy_endpoint(client):
 def test_accuracy_endpoint_empty(client):
     body = client.get("/api/accuracy").json()
     assert body["summary"] is None and body["flights"] == []
+
+
+def test_accuracy_pagination(client):
+    store = client.store
+    day = date(2026, 6, 7)
+    # 3 scored flights, landing times a minute apart (newest-first ordering)
+    for i in range(3):
+        serial = f"ACC{i}"
+        store.record_landing(serial, day, land_lat=45.5, land_lon=7.6, land_alt=210.0,
+                             landed_at=datetime(2026, 6, 7, 0, i, tzinfo=timezone.utc),
+                             detected_by="telemetry")
+        store.save_prediction(Prediction(
+            serial=serial, launch_day=day,
+            predicted_at=datetime(2026, 6, 7, 0, i, tzinfo=timezone.utc),
+            land_lat=45.6, land_lon=7.6,
+            land_eta=datetime(2026, 6, 7, 0, 40, tzinfo=timezone.utc),
+            source=PredictionSource.MEASURED, uncertainty_radius_km=5.0, alt_at_pred=500.0))
+
+    page1 = client.get("/api/accuracy?limit=2&offset=0").json()
+    # summary spans all 3 flights even though the page shows 2; total is the full count
+    assert page1["summary"]["n_flights"] == 3
+    assert page1["total"] == 3 and page1["offset"] == 0
+    assert [f["serial"] for f in page1["flights"]] == ["ACC2", "ACC1"]
+
+    page2 = client.get("/api/accuracy?limit=2&offset=2").json()
+    assert page2["summary"]["n_flights"] == 3  # unchanged by paging
+    assert [f["serial"] for f in page2["flights"]] == ["ACC0"]
 
 
 def test_accuracy_clear_endpoint(client):

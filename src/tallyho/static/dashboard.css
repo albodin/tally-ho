@@ -25,5 +25,8 @@ form { background:var(--panel); border:1px solid var(--line); border-radius:8px;
 .hint { grid-column:1/-1; color:var(--muted); font-size:12px; margin:-2px 0 2px; }
 #status { margin:10px 0; }
 .empty { color:var(--muted); font-style:italic; padding:8px; }
+.pager { display:flex; gap:10px; align-items:center; margin-top:8px; font-size:12px; }
+.pager:empty { display:none; }
+.pager .muted { min-width:9ch; text-align:center; }
 .svg-icon { background:none; border:0; }
 .svg-icon svg { display:block; filter:drop-shadow(0 1px 1.5px rgba(0,0,0,.55)); }

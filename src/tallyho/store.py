@@ -729,18 +729,25 @@ class Store:
         self._changed("alerts")
         return n
 
-    def recent_alerts(self, limit: int = 100) -> list[dict]:
-        """Recently-sent alerts joined to subscriber name + flight type (dashboard)."""
+    def recent_alerts(self, limit: int = 100, offset: int = 0) -> list[dict]:
+        """Recently-sent alerts joined to subscriber name + flight type (dashboard),
+        newest first. ``offset`` pages back through the history; pair it with
+        :meth:`count_alerts` for the total."""
         with self._lock:
             cur = self._conn.execute(
                 "SELECT a.*, s.name AS subscriber_name, f.type AS flight_type "
                 "FROM alerts a "
                 "LEFT JOIN subscribers s ON s.id = a.subscriber_id "
                 "LEFT JOIN flights f ON f.serial = a.serial AND f.launch_day = a.launch_day "
-                "ORDER BY a.sent_at DESC LIMIT ?",
-                (int(limit),),
+                "ORDER BY a.sent_at DESC LIMIT ? OFFSET ?",
+                (int(limit), int(offset)),
             )
             return [dict(r) for r in cur.fetchall()]
+
+    def count_alerts(self) -> int:
+        """Total sent-alert rows - the unpaged size behind :meth:`recent_alerts`."""
+        with self._lock:
+            return self._conn.execute("SELECT COUNT(*) FROM alerts").fetchone()[0]
 
     # ---- web-UI accounts + app state ---------------------------------------
     def add_user(self, username: str, password_hash: str) -> int:
