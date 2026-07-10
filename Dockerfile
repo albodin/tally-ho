@@ -24,16 +24,17 @@ COPY src ./src
 # resolve tally-ho's `windfall` dependency to the local package.
 RUN pip install --no-cache-dir "./predictor[dem,gfs]" ".[ingest,dem,gfs,api]"
 
-# Non-root runtime user.
+# Default runtime user. The container starts as root; the entrypoint fixes
+# bind-mount ownership and drops to PUID:PGID (default 10001). A compose
+# `user:` override skips all that and runs non-root directly.
 RUN useradd --create-home --uid 10001 tallyho \
     && mkdir -p /data /dem /gfs /hrrr \
     && chown -R tallyho /data /dem /gfs /hrrr
-USER tallyho
+COPY scripts/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
-# A `user:` override with no passwd entry in the image (e.g. compose PUID)
-# resolves HOME to "/", which herbie can't write its import-time config to;
-# pin HOME somewhere any uid can write. The file is throwaway - every herbie
-# call passes save_dir explicitly, so losing /tmp across restarts is fine.
+# Neither setpriv nor a compose `user:` override sets a usable HOME, which
+# herbie needs for its import-time config; pin it somewhere any uid can write.
+# The file is throwaway - every herbie call passes save_dir explicitly.
 ENV HOME=/tmp
 
 ENV TALLYHO_CONFIG=/data/config.toml \
@@ -51,5 +52,5 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
     CMD ["tallyho", "health"]
 
-ENTRYPOINT ["tallyho"]
+ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["run"]

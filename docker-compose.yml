@@ -7,7 +7,6 @@ services:
       context: .
       dockerfile: Dockerfile
     restart: unless-stopped
-    user: "${PUID:-10001}:${PGID:-10001}"
     volumes:
       - ${TALLYHO_DATA_DIR:-./data}:/data:z    # SQLite DB + heartbeat
       - ${TALLYHO_GFS_DIR:-./gfs}:/gfs:z        # GFS wind cache
@@ -16,6 +15,8 @@ services:
     environment:
       TZ: ${TZ:-America/Los_Angeles}
       TALLYHO_LOG_LEVEL: INFO
+      PUID: ${PUID:-10001}
+      PGID: ${PGID:-10001}
     ports:
       - "${TALLYHO_PORT:-8080}:8080"
     healthcheck:
