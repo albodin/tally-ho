@@ -30,6 +30,12 @@ RUN useradd --create-home --uid 10001 tallyho \
     && chown -R tallyho /data /dem /gfs /hrrr
 USER tallyho
 
+# A `user:` override with no passwd entry in the image (e.g. compose PUID)
+# resolves HOME to "/", which herbie can't write its import-time config to;
+# pin HOME somewhere any uid can write. The file is throwaway - every herbie
+# call passes save_dir explicitly, so losing /tmp across restarts is fine.
+ENV HOME=/tmp
+
 ENV TALLYHO_CONFIG=/data/config.toml \
     TALLYHO_DB_PATH=/data/tallyho.db \
     TALLYHO_HEALTH_FILE=/data/heartbeat \
