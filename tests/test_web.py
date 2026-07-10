@@ -4,6 +4,8 @@ The whole module is skipped unless the `api` extra (FastAPI) is installed, so th
 core suite stays dependency-free and offline-capable.
 """
 
+import threading
+import time
 from datetime import date, datetime, timezone
 
 import pytest
@@ -15,6 +17,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from tallyho.auth import hash_password  # noqa: E402
 from tallyho.config import Config  # noqa: E402
+from tallyho.events import EventBus  # noqa: E402
 from tallyho.models import AlertType, Prediction, PredictionSource, Subscriber  # noqa: E402
 from tallyho.notify import NtfySink  # noqa: E402
 from tallyho.store import Store  # noqa: E402
@@ -691,3 +694,102 @@ def test_history_etag_lets_unchanged_polls_revalidate(client):
     assert r3.status_code == 200
     assert r3.headers["etag"] != etag
     assert len(r3.json()["predictions"]) == 2
+
+
+# ---- SSE doorbell endpoint (/api/events) ----------------------------------
+# This Starlette's TestClient buffers the *whole* response before returning
+# (it runs the ASGI app to completion), so an infinite SSE stream would hang a
+# plain client.get("/api/events"). We therefore drive the GET on a worker thread
+# and let the generator terminate by closing the bus, then read the buffered
+# body. (The live-socket streaming path is what the design doc verified against
+# real uvicorn; this asserts the wire format + wiring without a real socket.)
+def _drain_events(client, bus, publishes, settle=0.2):
+    box = {}
+
+    def run():
+        box["r"] = client.get("/api/events")
+
+    t = threading.Thread(target=run)
+    t.start()
+    deadline = time.time() + 5
+    while not bus._clients and time.time() < deadline:  # wait until the generator registers
+        time.sleep(0.005)
+    publishes()
+    time.sleep(settle)          # let the debounce flush + delivery happen
+    bus.close()                 # wake the generator so it exits and the body completes
+    t.join(timeout=5)
+    assert not t.is_alive(), "SSE generator did not terminate on bus.close()"
+    return box["r"].text
+
+
+def _sse_app():
+    store = Store(":memory:")
+    bus = EventBus(debounce=0.01)   # tighter than prod so tests don't wait a second
+    app = create_app(Config(), store, bus=bus)
+    return app, store, bus
+
+
+def test_events_requires_a_session():
+    """/api/events lives under /api/*, so the RequireSession guard 401s an
+    unauthenticated open before the generator ever starts (a fast, non-streaming
+    response - no hang)."""
+    store = Store(":memory:")
+    try:
+        with TestClient(create_app(Config(), store)) as c:  # deliberately no login()
+            assert c.get("/api/events").status_code == 401
+    finally:
+        store.close()
+
+
+def test_events_delivers_doorbell_with_a_data_line():
+    app, store, bus = _sse_app()
+    try:
+        with TestClient(app) as c:
+            login(c, store)
+            body = _drain_events(c, bus, lambda: bus.publish("flights"))
+    finally:
+        store.close()
+    assert "event: stats" in body     # liveness frame emitted on connect
+    assert "event: flights" in body   # the published doorbell arrived
+    assert "data: {}" in body         # every doorbell carries data={} (else it never fires)
+
+
+def test_events_unregisters_the_client_on_disconnect():
+    app, store, bus = _sse_app()
+    try:
+        with TestClient(app) as c:
+            login(c, store)
+            _drain_events(c, bus, lambda: bus.publish("flights"))
+            assert bus._clients == set()   # the generator's finally ran unregister
+    finally:
+        store.close()
+
+
+def test_events_app_keepalive_ticks_stats(monkeypatch):
+    """With nothing changing, the endpoint still emits a periodic `event: stats`
+    every STATS_TICK so the dashboard's "last frame age" line advances."""
+    monkeypatch.setattr("tallyho.web.STATS_TICK", 0.1)
+    app, store, bus = _sse_app()
+    try:
+        with TestClient(app) as c:
+            login(c, store)
+            body = _drain_events(c, bus, lambda: None, settle=0.45)
+    finally:
+        store.close()
+    assert body.count("event: stats") >= 3   # connect frame + several timeout ticks
+
+
+def test_events_fastapi_ping_keepalive(monkeypatch):
+    """FastAPI's own `: ping` keepalive fires through our endpoint. The ping loop
+    reads fastapi.routing._PING_INTERVAL (routing imports the name at module
+    load), NOT fastapi.sse._PING_INTERVAL - patching the latter is a no-op."""
+    monkeypatch.setattr("fastapi.routing._PING_INTERVAL", 0.1)
+    monkeypatch.setattr("tallyho.web.STATS_TICK", 100.0)  # keep our stream silent so pings show
+    app, store, bus = _sse_app()
+    try:
+        with TestClient(app) as c:
+            login(c, store)
+            body = _drain_events(c, bus, lambda: None, settle=0.35)
+    finally:
+        store.close()
+    assert ": ping" in body

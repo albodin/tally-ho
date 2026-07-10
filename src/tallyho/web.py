@@ -24,12 +24,14 @@ Design notes:
   first-run setup wizard (:mod:`tallyho.setup`).
 """
 
+import asyncio
 import hashlib
 import json
 import logging
 import math
 import re
 import secrets
+from contextlib import asynccontextmanager
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Literal
@@ -45,6 +47,24 @@ log = logging.getLogger(__name__)
 _STATIC = Path(__file__).resolve().parent / "static"
 _INDEX_HTML = _STATIC / "index.html"
 _LOGIN_HTML = _STATIC / "login.html"
+
+STATS_TICK = 30.0   # periodic stats doorbell; drives the "last frame age" health line
+
+
+async def _data_version_watcher(store: Store, bus, interval: float = 2.0) -> None:
+    """Standalone ``tallyho web`` (and CLI writes like ``tallyho token set`` while
+    ``run`` is up) write from a *different* SQLite connection, so Store.on_change
+    never sees them. PRAGMA data_version bumps only for out-of-connection commits,
+    so this emits a coarse ``changed`` doorbell for exactly those and never
+    double-fires under ``tallyho run``, where daemon and web share one connection
+    (same-connection commits don't bump it)."""
+    last = store.data_version()
+    while True:
+        await asyncio.sleep(interval)
+        v = store.data_version()
+        if v != last:
+            last = v
+            bus.publish("changed")   # client maps to refreshAll()
 
 
 def heartbeat_age(cfg: Config) -> float | None:
@@ -101,15 +121,19 @@ def _serialize_subscriber(s: Subscriber) -> dict:
     }
 
 
-def create_app(cfg: Config, store: Store, ntfy_sink=None):
+def create_app(cfg: Config, store: Store, ntfy_sink=None, bus=None):
     """Build the FastAPI app. ``store`` is injected so tests can pass an
     in-memory Store and the CLI can pass ``Store(cfg.db_path)``. ``ntfy_sink``
     (an :class:`~tallyho.notify.NtfySink`) is likewise injectable so the
     ``/api/test-ntfy`` route can be exercised without real network I/O; when
-    ``None`` it lazily builds an :class:`~tallyho.notify.HttpNtfySink`."""
+    ``None`` it lazily builds an :class:`~tallyho.notify.HttpNtfySink`. ``bus``
+    (an :class:`~tallyho.events.EventBus`) is injectable so a test can publish
+    into the same instance the ``/api/events`` endpoint fans out from; when
+    ``None`` a fresh one is built."""
     try:
         from fastapi import FastAPI, HTTPException, Request, Response
         from fastapi.responses import FileResponse, JSONResponse
+        from fastapi.sse import EventSourceResponse, ServerSentEvent
         from fastapi.staticfiles import StaticFiles
         from pydantic import BaseModel, ConfigDict, Field
         from starlette.middleware.sessions import SessionMiddleware
@@ -120,6 +144,21 @@ def create_app(cfg: Config, store: Store, ntfy_sink=None):
 
     from .auth import (SESSION_MAX_AGE, LoginLimiter, RequireSession,
                        hash_password, session_secret, verify_password)
+    from .events import EventBus
+    if bus is None:
+        bus = EventBus()
+
+    @asynccontextmanager
+    async def lifespan(app):
+        bus.attach_loop(asyncio.get_running_loop())  # capture the web thread's loop
+        store.on_change = bus.publish                # cross-thread publishing starts here
+        watcher = asyncio.create_task(_data_version_watcher(store, bus))
+        try:
+            yield
+        finally:
+            watcher.cancel()
+            store.on_change = None                   # stop publishing into a dead loop
+            bus.close()
 
     class SubscriberIn(BaseModel):
         # Reject unknown fields so a stray `ntfy_token` (a secret) is a 422, not
@@ -159,7 +198,8 @@ def create_app(cfg: Config, store: Store, ntfy_sink=None):
             ntfy_token_ref=p.ntfy_token_ref or None, units=p.units, active=p.active,
         )
 
-    app = FastAPI(title="tally-ho", docs_url="/api/docs", openapi_url="/api/openapi.json")
+    app = FastAPI(title="tally-ho", docs_url="/api/docs",
+                  openapi_url="/api/openapi.json", lifespan=lifespan)
     # Session cookie first (outermost), then the guard that needs it. The
     # signing secret persists in the DB, so sessions survive restarts.
     app.add_middleware(RequireSession)
@@ -239,6 +279,37 @@ def create_app(cfg: Config, store: Store, ntfy_sink=None):
             "subscribers": len(store.list_subscribers(active_only=False)),
             "last_frame_age_s": None if age is None else round(age, 1),
         }
+
+    @app.get("/api/events", response_class=EventSourceResponse, include_in_schema=False)
+    async def events():
+        """SSE doorbell stream: a coalesced event name per changed dataset (see
+        Store.on_change), no payload since the browser refetches the affected
+        endpoint. Session-protected like the rest of /api/* (the pure-ASGI
+        RequireSession guard 401s an unauthenticated open before this runs; auth
+        is checked once, so an expired session only bites on the next reconnect).
+
+        Every doorbell carries ``data={}`` on purpose: an empty ``data={}``
+        serializes to a ``data: {}`` line so the browser fires the listener,
+        whereas ``data=None`` omits the ``data:`` line and the event never fires."""
+        client = bus.register()
+        try:
+            yield ServerSentEvent(event="stats", data={})   # confirm liveness on connect
+            while not bus.closed:
+                try:
+                    async with asyncio.timeout(STATS_TICK):
+                        await client.event.wait()
+                except TimeoutError:
+                    # Nothing changed, but "last frame age" moves with wall-clock
+                    # time; tick the health line. Doubles as an app-level keepalive
+                    # on top of FastAPI's 15 s ping.
+                    yield ServerSentEvent(event="stats", data={})
+                    continue
+                client.event.clear()
+                names, client.dirty = client.dirty, set()
+                for name in sorted(names):
+                    yield ServerSentEvent(event=name, data={})
+        finally:
+            bus.unregister(client)
 
     # ---- dashboard reads -------------------------------------------------
     @app.get("/api/flights")
@@ -558,7 +629,13 @@ def build_server(cfg: Config, store: Store, host: str = "127.0.0.1", port: int =
             "the web UI needs uvicorn; install it with: pip install '.[api]'"
         ) from exc
     app = create_app(cfg, store)
-    config = uvicorn.Config(app, host=host, port=port, log_level=cfg.log_level.lower())
+    # Bound graceful shutdown so a lingering SSE stream (an in-flight response)
+    # can't hold uvicorn open: after 3 s it's dropped and the generator's
+    # `finally` still runs. (timeout_keep_alive governs idle connections between
+    # requests, not an active stream, so it needs no tuning.)
+    config = uvicorn.Config(app, host=host, port=port,
+                            log_level=cfg.log_level.lower(),
+                            timeout_graceful_shutdown=3)
     return uvicorn.Server(config)
 
 

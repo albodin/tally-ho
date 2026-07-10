@@ -206,8 +206,23 @@ class Store:
         # flights/predictions/alerts while `tallyho web` writes subscribers). Retry
         # briefly on a transient writer lock instead of raising "database is locked".
         self._conn.execute("PRAGMA busy_timeout=5000")
+        # Set by the web lifespan to EventBus.publish so writes ring the SSE
+        # doorbell; None (the default) means writes publish nothing.
+        self.on_change: Callable[[str], None] | None = None
         with self._lock:
             self._apply_schema()
+
+    def _changed(self, name: str) -> None:
+        cb = self.on_change            # read once; may be reassigned from another thread
+        if cb is not None:
+            cb(name)                   # must be thread-safe; EventBus.publish is
+
+    def data_version(self) -> int:
+        """PRAGMA data_version: unchanged by commits on THIS connection, bumped by
+        commits from another connection/process (incl. WAL). Drives the standalone
+        ``tallyho web`` cross-process watcher."""
+        with self._lock:
+            return self._conn.execute("PRAGMA data_version").fetchone()[0]
 
     def _apply_schema(self) -> None:
         """Create or upgrade the schema, one version at a time. Version 0 means
@@ -253,6 +268,7 @@ class Store:
         with self._lock:
             self._conn.execute(sql, tuple(row.get(c) for c in cols))
             self._conn.commit()
+        self._changed("flights")
 
     def get_flight(self, serial: str, launch_day: date) -> dict | None:
         with self._lock:
@@ -362,6 +378,7 @@ class Store:
                 r,
             )
             self._conn.commit()
+        self._changed("flights")
         # The predicted trajectory rides along in a separate latest-only table.
         if pred.path:
             self.save_prediction_path(pred)
@@ -380,6 +397,7 @@ class Store:
                  json.dumps([list(p) for p in pred.path])),
             )
             self._conn.commit()
+        self._changed("flights")
 
     def latest_prediction(self, serial: str, launch_day: date) -> dict | None:
         with self._lock:
@@ -444,6 +462,7 @@ class Store:
                 (serial, launch_day.isoformat(), t, lat, lon, alt),
             )
             self._conn.commit()
+        self._changed("flights")
 
     def track_for(self, serial: str, launch_day: date) -> list[dict]:
         """The full flown track for one flight, oldest point first."""
@@ -493,6 +512,7 @@ class Store:
                  _iso(landed_at), detected_by),
             )
             self._conn.commit()
+        self._changed("accuracy")
 
     def get_landing(self, serial: str, launch_day: date) -> dict | None:
         with self._lock:
@@ -517,6 +537,7 @@ class Store:
             self._conn.execute(
                 f"DELETE FROM prediction_paths WHERE (serial, launch_day) IN {finished}")
             self._conn.commit()
+        self._changed("accuracy")
         return {"landings": n_landings, "predictions": n_preds}
 
     def recent_landings(self, limit: int = 100) -> list[dict]:
@@ -543,7 +564,9 @@ class Store:
                  created.isoformat()),
             )
             self._conn.commit()
-            return int(cur.lastrowid)
+            sid = int(cur.lastrowid)
+        self._changed("subscribers")
+        return sid
 
     def list_subscribers(self, active_only: bool = True) -> list[Subscriber]:
         sql = "SELECT * FROM subscribers"
@@ -560,7 +583,9 @@ class Store:
                 "UPDATE subscribers SET active=? WHERE id=?", (int(active), sub_id)
             )
             self._conn.commit()
-            return cur.rowcount > 0
+            changed = cur.rowcount > 0
+        self._changed("subscribers")
+        return changed
 
     def get_subscriber(self, sub_id: int) -> Subscriber | None:
         with self._lock:
@@ -579,13 +604,17 @@ class Store:
                  sub.ntfy_topic, sub.ntfy_token_ref, sub.units, int(sub.active), sub.id),
             )
             self._conn.commit()
-            return cur.rowcount > 0
+            changed = cur.rowcount > 0
+        self._changed("subscribers")
+        return changed
 
     def delete_subscriber(self, sub_id: int) -> bool:
         with self._lock:
             cur = self._conn.execute("DELETE FROM subscribers WHERE id=?", (sub_id,))
             self._conn.commit()
-            return cur.rowcount > 0
+            changed = cur.rowcount > 0
+        self._changed("subscribers")
+        return changed
 
     @staticmethod
     def _sub_from_row(r: sqlite3.Row) -> Subscriber:
@@ -619,7 +648,9 @@ class Store:
                  distance_km, land_lat, land_lon, _iso(sent_at)),
             )
             self._conn.commit()
-            return cur.rowcount > 0
+            changed = cur.rowcount > 0
+        self._changed("alerts")
+        return changed
 
     def get_alert(
         self, subscriber_id: int, serial: str, launch_day: date, alert_type: AlertType
@@ -656,6 +687,7 @@ class Store:
                  distance_km, land_lat, land_lon, _iso(sent_at)),
             )
             self._conn.commit()
+        self._changed("alerts")
 
     def last_alert_at(
         self, subscriber_id: int, serial: str, launch_day: date, alert_type: AlertType
@@ -681,6 +713,7 @@ class Store:
                  alert_type.value),
             )
             self._conn.commit()
+        self._changed("alerts")
 
     def clear_alerts(self) -> int:
         """Wipe the recent-alerts history. Rows for flights still in the air are
@@ -693,6 +726,7 @@ class Store:
                 "(SELECT serial, launch_day FROM flights WHERE state != 'LANDED')"
             ).rowcount
             self._conn.commit()
+        self._changed("alerts")
         return n
 
     def recent_alerts(self, limit: int = 100) -> list[dict]:
@@ -740,6 +774,7 @@ class Store:
                 (name, token, _iso(datetime.now(timezone.utc))),
             )
             self._conn.commit()
+        self._changed("tokens")
 
     def get_ntfy_token(self, name: str) -> str | None:
         """The token value - for the send path only, never for API responses."""
@@ -764,7 +799,9 @@ class Store:
         with self._lock:
             cur = self._conn.execute("DELETE FROM ntfy_tokens WHERE name=?", (name,))
             self._conn.commit()
-        return cur.rowcount > 0
+            changed = cur.rowcount > 0
+        self._changed("tokens")
+        return changed
 
     def ntfy_token_refs(self, name: str) -> int:
         """How many subscribers reference this token name (delete protection)."""

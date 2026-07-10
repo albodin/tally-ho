@@ -1,11 +1,13 @@
 // Dashboard entry point: header wiring, the clear-history buttons, and the
-// 15 s refresh loop that drives every module.
+// refresh loop that drives every module; pushed by SSE (see events.js), with
+// the old 15 s poll kept as an automatic fallback while SSE is down.
 import { $, api, setDisplayTz, status } from "./util.js";
 import { refreshMap } from "./map.js";
 import { refreshHistory } from "./history.js";
 import { refreshAccuracy, refreshAlerts, refreshFlights, refreshSubs } from "./tables.js";
 import { initSubscribers } from "./subscribers.js";
 import { initTokens, refreshTokens } from "./tokens.js";
+import { connectEvents } from "./events.js";
 
 const REFRESH_MS = 15000;
 
@@ -58,6 +60,32 @@ $("alerts-clear").addEventListener("click", async () => {
 
 initSubscribers(refreshAll);
 initTokens();
-// Load DISPLAY_TZ before the first paint so times never flash in UTC first.
-loadConfig().then(refreshAll);
-setInterval(refreshAll, REFRESH_MS);
+
+// event -> refetchers (subscribers refreshes tokens too: the tokens table shows
+// a per-token reference count that subscriber edits change).
+const EVENT_REFETCH = {
+  flights:     [refreshFlights, refreshMap, refreshHistory, refreshHealth],
+  accuracy:    [refreshAccuracy, refreshMap, refreshFlights],
+  alerts:      [refreshAlerts],
+  subscribers: [refreshSubs, refreshMap, refreshTokens, refreshHealth],
+  tokens:      [refreshTokens],
+  stats:       [refreshHealth],
+  changed:     [refreshAll],
+};
+
+let fallbackTimer = null;
+const startFallbackPoll = () => { if (!fallbackTimer) fallbackTimer = setInterval(refreshAll, REFRESH_MS); };
+const stopFallbackPoll  = () => { if (fallbackTimer) { clearInterval(fallbackTimer); fallbackTimer = null; } };
+
+// Load DISPLAY_TZ before the first paint so times never flash in UTC first,
+// then hand the refresh loop to SSE (poll only while it's down).
+loadConfig().then(() => {
+  refreshAll();
+  connectEvents(EVENT_REFETCH, {
+    onUp:   () => { stopFallbackPoll(); refreshAll(); },  // resync anything missed
+    onDown: () => { startFallbackPoll(); },              // degrade to today's behavior
+  });
+});
+// Slow safety net even while connected: cheap insurance for the hhmm() "today vs
+// dated" labels crossing midnight and any missed doorbell.
+setInterval(refreshAll, 10 * 60 * 1000);
