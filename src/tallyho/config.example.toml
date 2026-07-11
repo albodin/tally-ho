@@ -33,6 +33,8 @@
 [tracker]
 # burst_drop_m = 300.0              # alt below running max to call burst
 # burst_consecutive = 3
+# ascent_min_gain_m = 500.0         # must climb this far above the first fix before a burst is recorded
+# burst_revert_climb_m = 500.0      # climb back above a called burst that undoes it (downdraft/GPS spike)
 # float_rate_abs_mps = 1.0
 # float_min_alt_m = 12000.0
 # float_window_seconds = 300.0

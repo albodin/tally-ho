@@ -22,6 +22,18 @@ log = logging.getLogger(__name__)
 class TrackerConfig:
     burst_drop_m: float = 300.0            # alt below running max to call burst
     burst_consecutive: int = 3             # consecutive negative-rate frames
+    # A burst altitude is only *recorded* (and fed to the per-site prior) once the
+    # flight has been observed to genuinely climb this far above its first fix. A
+    # sonde first heard already descending (launched out of range, drifted into
+    # reception on the way down) never gains this, so it is tracked as DESCENT but
+    # keeps ``burst_alt = None`` - we never saw its burst, so it must not poison
+    # the climatology with a bogus low "burst" at the first-heard altitude.
+    ascent_min_gain_m: float = 500.0
+    # Undo a called burst if the sonde later climbs back this far above the
+    # recorded burst altitude: a strong downdraft (or a GPS spike poisoning
+    # max_alt) can briefly fake the drop, but a real burst never re-ascends. The
+    # revert clears burst_alt so the *real* burst higher up is the one recorded.
+    burst_revert_climb_m: float = 500.0
     float_rate_abs_mps: float = 1.0        # |vert rate| below this = floaty
     float_min_alt_m: float = 12_000.0      # only consider FLOAT above this band
     float_window_seconds: float = 300.0    # sustained window to declare FLOAT

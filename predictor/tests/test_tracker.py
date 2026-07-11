@@ -108,6 +108,62 @@ def test_floater_does_not_burst():
     assert fl.state == FlightState.FLOAT
 
 
+def _frames_from_alts(serial, alts, lat=45.0, lon=7.0, t0=0.0, dt=1.0, type="RS41"):
+    """Build a frame stream that walks a given altitude profile at a fixed
+    position (position is irrelevant to burst/float/landed state logic)."""
+    frames = []
+    for i, alt in enumerate(alts):
+        d = BASE + timedelta(seconds=t0 + i * dt)
+        frames.append(Frame(serial=serial, lat=lat, lon=lon, alt=float(alt),
+                            t=d.timestamp(), dt=d, frame=i, type=type))
+    return frames
+
+
+def test_first_heard_descending_records_no_burst():
+    """A sonde first heard already falling (launched out of range, drifted into
+    reception on the way down) must NOT be logged as a burst at its first-heard
+    altitude - that bogus low 'burst' is what used to poison the per-site
+    climatology. It is tracked as a genuine descent instead: state reaches
+    DESCENT/LANDED, descent samples are collected, but burst_alt stays None and
+    no launch site is claimed."""
+    cfg = Config()
+    tracker = FlightTracker(cfg)
+    # first heard at 8 km, monotonic descent all the way to the ground
+    alts = [a for a in range(8000, 240, -8)]
+    frames = _frames_from_alts("FELLIN", alts)
+    fl, states, events = run_flight(tracker, frames)
+    assert FlightState.DESCENT in states
+    assert fl.state == FlightState.LANDED
+    assert fl.burst_alt is None           # never observed a burst
+    assert fl.launch_lat is None          # first heard high → no launch site
+    assert len(fl.descent_samples) > 10   # the descent itself is real data
+
+
+def test_wind_dip_reverts_false_burst():
+    """A strong downdraft (or a GPS spike poisoning max_alt) can shove a still-
+    rising balloon >burst_drop_m below its running max and briefly look like a
+    burst. When it climbs back above that apogee the false burst must be undone,
+    so the REAL burst higher up is the one recorded - not the dip altitude."""
+    cfg = Config()
+    tracker = FlightTracker(cfg)
+    alts, a = [], 200.0
+    while a < 15000:            # climb to a first apogee at ~15 km
+        alts.append(a); a += 5.0
+    while a > 15000 - 600:      # downdraft shoves it 600 m below max (> 300 m)
+        alts.append(a); a -= 10.0
+    while a < 30000:            # recover, climb past the false apogee to real burst
+        alts.append(a); a += 5.0
+    real_top = a
+    while a > 29000:            # then the real descent
+        alts.append(a); a -= 8.0
+    fl, states, events = run_flight(tracker, _frames_from_alts("DIP", alts))
+    # the dip drove it to DESCENT, then it re-ascended (revert), then burst for real
+    first_desc = states.index(FlightState.DESCENT)
+    assert FlightState.ASCENT in states[first_desc:]        # reverted back to ASCENT
+    assert fl.burst_alt == pytest.approx(real_top, abs=300)  # real apogee, not the dip
+    assert fl.burst_alt > 25000
+
+
 def test_serial_reuse_starts_new_flight():
     cfg = Config()
     tracker = FlightTracker(cfg)

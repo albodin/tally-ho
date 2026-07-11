@@ -85,6 +85,8 @@ class Flight:
     landed_alt: float | None = None      # altitude when LANDED was declared (stable re-ascent anchor)
     # transient runtime state
     prev_frame: Frame | None = None
+    first_alt: float | None = None       # altitude of the first frame seen this session
+    ascended: bool = False               # observed to genuinely climb (gate for recording a burst)
     neg_rate_count: int = 0
     glitch_count: int = 0                # consecutive teleport-gated frames
     reascent_count: int = 0              # consecutive climbing frames since LANDED (serial-reuse gate)
@@ -178,6 +180,12 @@ class FlightTracker:
         rows.sort(key=lambda r: (r["last_seen"] or r["first_seen"] or ""))
         for row in rows:
             flight = Flight.from_row(row)
+            # A persisted in-flight sonde has real tracking history: if it's still
+            # ASCENT/FLOAT it genuinely climbed (first-heard-descending catches
+            # reach DESCENT within minutes), so re-open the burst gate. first_alt
+            # isn't persisted, so without this a burst right after a restart -
+            # measured against the resume altitude - could be missed.
+            flight.ascended = flight.state in (FlightState.ASCENT, FlightState.FLOAT)
             key = (flight.serial, flight.launch_day)
             saved = self.store.load_profile(flight.serial, flight.launch_day)
             if saved is not None:
@@ -370,6 +378,7 @@ class FlightTracker:
     def _apply_frame(self, flight: Flight, frame: Frame, events: list[TrackerEvent]) -> None:
         if flight.first_seen is None:
             flight.first_seen = frame.dt
+            flight.first_alt = frame.alt
             # Only claim a launch site when we actually heard the sonde near
             # the ground. First-heard-high means it launched out of range -
             # the launch site is unknown, not the mid-air first-fix position.
@@ -381,6 +390,12 @@ class FlightTracker:
         vrate = self._vertical_rate(flight, frame)
 
         flight.max_alt = max(flight.max_alt, frame.alt)
+        # A burst may only be recorded once we've seen the sonde truly climb. A
+        # sonde first heard already falling never trips this, so its inevitable
+        # "drop below max" is tracked as descent without a bogus burst altitude.
+        if (not flight.ascended and flight.first_alt is not None
+                and flight.max_alt - flight.first_alt >= self.cfg.tracker.ascent_min_gain_m):
+            flight.ascended = True
 
         # Collect ascent-rate history for the robust pre-burst estimate.
         if flight.state == FlightState.ASCENT and vrate is not None and vrate > 0:
@@ -410,9 +425,12 @@ class FlightTracker:
         if flight.state == FlightState.ASCENT:
             self._maybe_float(flight, frame, vrate, events)
 
-        if flight.state == FlightState.DESCENT and vrate is not None and vrate < 0:
-            self._collect_descent(flight, frame, vrate)
-            self._maybe_landed(flight, frame, events)
+        if flight.state == FlightState.DESCENT:
+            if self._maybe_revert_burst(flight, frame):
+                pass  # was a transient dip, not a burst - now ASCENT again
+            elif vrate is not None and vrate < 0:
+                self._collect_descent(flight, frame, vrate)
+                self._maybe_landed(flight, frame, events)
 
         flight.last_lat, flight.last_lon, flight.last_alt = frame.lat, frame.lon, frame.alt
         flight.last_t = frame.t
@@ -467,16 +485,50 @@ class FlightTracker:
             flight.neg_rate_count += 1
         else:
             flight.neg_rate_count = 0
-        if flight.neg_rate_count >= tcfg.burst_consecutive:
-            flight.state = FlightState.DESCENT
+        if flight.neg_rate_count < tcfg.burst_consecutive:
+            return
+        # A sustained drop below the running max: the sonde is descending, so
+        # start tracking it as such (this is what drives the landing prediction).
+        flight.state = FlightState.DESCENT
+        flight.float_since_t = None
+        # restart the vrate window so descent rates aren't diluted by the
+        # tail of ascent points still inside it
+        del flight.alt_window[:-1]
+        if flight.ascended:
+            # We watched it climb to this apogee, so this max IS the burst
+            # altitude - record it and let it feed the per-site burst prior.
             flight.burst_alt = flight.max_alt
             flight.burst_t = frame.t
-            flight.float_since_t = None
-            # restart the vrate window so descent rates aren't diluted by the
-            # tail of ascent points still inside it
-            del flight.alt_window[:-1]
-            events.append(TrackerEvent.BURST)
-            self._persist(flight, profile=True)
+        # else: first heard already falling - genuinely descending, but we never
+        # observed its burst. Leave burst_alt None so it cannot poison the prior.
+        events.append(TrackerEvent.BURST)
+        self._persist(flight, profile=True)
+
+    def _maybe_revert_burst(self, flight: Flight, frame: Frame) -> bool:
+        """Undo a called burst when the sonde climbs back above its supposed
+        apogee. A strong downdraft - or a GPS spike that poisoned ``max_alt`` -
+        can briefly fake the ``burst_drop_m`` drop while the balloon is still
+        rising; a real burst never re-ascends. Reverting to ASCENT clears the
+        false burst so the *real* burst higher up is the one recorded, and stops
+        the spurious descent predictions the false burst was emitting.
+
+        Only meaningful once a burst altitude was recorded (``ascended``); a
+        descent caught mid-fall has ``burst_alt = None`` and nothing to revert."""
+        if flight.burst_alt is None:
+            return False
+        if frame.alt <= flight.burst_alt + self.cfg.tracker.burst_revert_climb_m:
+            return False
+        log.info("%s: re-ascended %.0f m above called burst %.0f m - reverting "
+                 "to ASCENT (transient dip, not a burst)", flight.serial,
+                 frame.alt - flight.burst_alt, flight.burst_alt)
+        flight.state = FlightState.ASCENT
+        flight.burst_alt = None
+        flight.burst_t = None
+        flight.neg_rate_count = 0
+        flight.float_since_t = None
+        flight.descent_samples.clear()
+        self._persist(flight, profile=True)
+        return True
 
     def _maybe_float(self, flight: Flight, frame: Frame, vrate, events) -> None:
         tcfg = self.cfg.tracker
