@@ -548,6 +548,53 @@ def test_map_includes_predicted_path_and_landing(client):
     assert landing["properties"]["detected_by"] == "telemetry"
 
 
+def test_map_track_extends_to_live_fix(client):
+    """The breadcrumb table is downsampled, so its last point trails the
+    per-frame flight marker; the track feature must be stitched to the marker
+    so the line never visibly lags the balloon."""
+    store = client.store
+    _seed_flight_pred_alert(store)  # S1's live fix is (45.1, 7.2)
+    day = date(2026, 6, 7)
+    # breadcrumbs stop short of the live fix (downsampling lag)
+    for t, lat, lon, alt in [(0.0, 45.0, 7.0, 200.0), (60.0, 45.05, 7.1, 9000.0)]:
+        store.append_track_point("S1", day, t, lat, lon, alt)
+
+    fc = client.get("/api/map").json()
+    track = [f for f in fc["features"] if f["properties"]["kind"] == "track"][0]
+    coords = track["geometry"]["coordinates"]
+    assert coords[-1] == [7.2, 45.1]  # appended live fix, [lon, lat]
+    assert len(coords) == 3
+
+    # a breadcrumb AT the live fix is not duplicated
+    store.append_track_point("S1", day, 120.0, 45.1, 7.2, 8000.0)
+    fc = client.get("/api/map").json()
+    track = [f for f in fc["features"] if f["properties"]["kind"] == "track"][0]
+    assert track["geometry"]["coordinates"][-1] == [7.2, 45.1]
+    assert len(track["geometry"]["coordinates"]) == 3
+
+
+def test_map_path_starts_at_live_fix(client):
+    """The stored predicted path starts where the sonde was at prediction
+    time; by the next map refresh the sonde has moved on. The path feature's
+    first vertex must be replaced with the marker position so the dashed line
+    connects to the balloon (replaced, not prepended - no doubling back)."""
+    store = client.store
+    _seed_flight_pred_alert(store)  # S1's live fix is (45.1, 7.2)
+    store.save_prediction(Prediction(
+        serial="S1", launch_day=date(2026, 6, 7),
+        predicted_at=datetime(2026, 6, 7, 0, 12, tzinfo=timezone.utc),
+        land_lat=45.5, land_lon=7.6,
+        land_eta=datetime(2026, 6, 7, 0, 40, tzinfo=timezone.utc),
+        source=PredictionSource.MEASURED, uncertainty_radius_km=2.5,
+        path=[(45.08, 7.15, 8500.0), (45.3, 7.4, 4000.0), (45.5, 7.6, 200.0)]))
+
+    fc = client.get("/api/map").json()
+    path = [f for f in fc["features"] if f["properties"]["kind"] == "path"][0]
+    coords = path["geometry"]["coordinates"]
+    assert coords[0] == [7.2, 45.1]  # stale start replaced by the live fix
+    assert coords[1:] == [[7.4, 45.3], [7.6, 45.5]]
+
+
 def test_accuracy_endpoint(client):
     store = client.store
     store.record_landing("ACC1", date(2026, 6, 7), land_lat=45.50, land_lon=7.60,

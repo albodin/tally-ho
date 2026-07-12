@@ -440,6 +440,12 @@ def create_app(cfg: Config, store: Store, ntfy_sink=None, bus=None,
         + uncertainty), ``landing`` (actual recorded landing), and ``subscriber``
         (watched location)."""
         features = []
+        # Current fix per active flight, for stitching the track/path lines to
+        # the live marker below. The flight row updates every frame, but the
+        # track breadcrumb is downsampled (~250 m / 30 s) and the path is a
+        # snapshot from the last prediction run - drawn as stored, both lines
+        # visibly trail/miss the marker.
+        live_fix: dict[tuple, list] = {}
         for f in store.active_flights():
             if f["launch_lat"] is not None and f["launch_lon"] is not None:
                 features.append({
@@ -453,6 +459,7 @@ def create_app(cfg: Config, store: Store, ntfy_sink=None, bus=None,
                 })
             if f["last_lat"] is None or f["last_lon"] is None:
                 continue
+            live_fix[(f["serial"], f["launch_day"])] = [f["last_lon"], f["last_lat"]]
             features.append({
                 "type": "Feature",
                 "geometry": {"type": "Point", "coordinates": [f["last_lon"], f["last_lat"]]},
@@ -464,6 +471,10 @@ def create_app(cfg: Config, store: Store, ntfy_sink=None, bus=None,
         for tr in store.latest_tracks_for_active():
             # track rows store [lat, lon, alt]; GeoJSON wants [lon, lat]
             coords = [[pt[1], pt[0]] for pt in tr["track"]]
+            # extend to the live marker (the last kept breadcrumb trails it)
+            fix = live_fix.get((tr["serial"], tr["launch_day"]))
+            if fix is not None and coords and coords[-1] != fix:
+                coords.append(fix)
             if len(coords) < 2:
                 continue
             features.append({
@@ -474,6 +485,12 @@ def create_app(cfg: Config, store: Store, ntfy_sink=None, bus=None,
         for pp in store.latest_paths_for_active():
             # path rows store [lat, lon, alt]; GeoJSON wants [lon, lat]
             coords = [[pt[1], pt[0]] for pt in pp["path"]]
+            # re-anchor on the live marker: the stored path starts where the
+            # sonde was when last predicted. Replace (don't prepend) - the
+            # sonde flew roughly along the path, so prepending doubles back.
+            fix = live_fix.get((pp["serial"], pp["launch_day"]))
+            if fix is not None and coords:
+                coords[0] = fix
             if len(coords) < 2:
                 continue
             features.append({
