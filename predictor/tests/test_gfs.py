@@ -366,6 +366,8 @@ def test_predictor_uses_gfs_when_no_ascent_profile():
     assert pred.land_lon > 7.0   # drifted east under the GFS wind
     # GFS source → larger uncertainty (extrapolated bucket)
     assert pred.uncertainty_radius_km > 0
+    # already descending: its burst is observed, not predicted - no burst point
+    assert pred.burst_lat is None and pred.burst_alt is None
 
 
 def _mid_descent_flight(serial="MIDD"):
@@ -492,6 +494,12 @@ def test_preburst_prediction_drifts_downwind():
     # eastward wind over a long ascent+descent → lands well east
     assert pred.land_lon > 7.0
     assert pred.uncertainty_radius_km > 1.0   # pre-burst is uncertain
+    # the predicted burst point rides along (for the map's burst marker):
+    # above the sonde, east of it, and short of the landing - both legs drift
+    # east under the same wind
+    assert pred.burst_alt is not None and pred.burst_alt > 12000.0
+    assert 7.0 < pred.burst_lon < pred.land_lon
+    assert pred.burst_lat == pytest.approx(45.0, abs=0.2)   # no meridional wind
 
 
 def test_select_bracketing_respects_publication_latency():

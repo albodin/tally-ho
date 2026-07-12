@@ -303,6 +303,36 @@ def test_db_from_newer_build_refused(tmp_path):
         Store(db)
 
 
+def test_v2_migration_adds_path_burst_columns(tmp_path):
+    """A database whose prediction_paths still has the v1 shape must gain the
+    burst-point columns on open - whether it is stamped v1 or predates
+    versioning entirely (user_version 0: adopted at the v1 baseline, then the
+    migration replays)."""
+    for stamp in (1, 0):
+        db = tmp_path / f"stamp{stamp}.db"
+        s = Store(db)
+        s._conn.executescript(
+            "DROP TABLE prediction_paths;"
+            "CREATE TABLE prediction_paths ("
+            "  serial TEXT NOT NULL, launch_day TEXT NOT NULL,"
+            "  predicted_at TEXT NOT NULL, source TEXT NOT NULL,"
+            "  land_eta TEXT, path_json TEXT NOT NULL,"
+            "  PRIMARY KEY (serial, launch_day))")
+        s._conn.execute(f"PRAGMA user_version = {stamp}")
+        s._conn.commit()
+        s.close()
+
+        s = Store(db)
+        try:
+            cols = {r[1] for r in s._conn.execute(
+                "PRAGMA table_info(prediction_paths)")}
+            assert {"burst_lat", "burst_lon", "burst_alt"} <= cols
+            assert s._conn.execute("PRAGMA user_version").fetchone()[0] \
+                == tallyho.store._SCHEMA_VERSION
+        finally:
+            s.close()
+
+
 def test_prediction_path_saved_and_excludes_landed(store):
     store.upsert_flight({
         "serial": "P1", "launch_day": "2026-06-07", "type": "RS41", "state": "DESCENT",
@@ -322,6 +352,7 @@ def test_prediction_path_saved_and_excludes_landed(store):
         land_lat=45.5, land_lon=7.6,
         land_eta=datetime(2026, 6, 7, 0, 40, tzinfo=timezone.utc),
         source=PredictionSource.MEASURED, uncertainty_radius_km=2.0,
+        burst_lat=45.2, burst_lon=7.3, burst_alt=31000.0,
         path=[(45.1, 7.2, 8000.0), (45.3, 7.4, 4000.0), (45.5, 7.6, 200.0)]))
     # landed flight has a path too, but it must be excluded from the active map
     store.save_prediction(Prediction(
@@ -335,6 +366,9 @@ def test_prediction_path_saved_and_excludes_landed(store):
     assert len(rows) == 1
     assert rows[0]["serial"] == "P1"
     assert rows[0]["path"] == [[45.1, 7.2, 8000.0], [45.3, 7.4, 4000.0], [45.5, 7.6, 200.0]]
+    # the predicted burst point rides along with the path
+    assert (rows[0]["burst_lat"], rows[0]["burst_lon"], rows[0]["burst_alt"]) \
+        == (45.2, 7.3, 31000.0)
 
 
 def test_prediction_path_upserts_latest(store):
@@ -350,6 +384,7 @@ def test_prediction_path_upserts_latest(store):
                 source=PredictionSource.MEASURED, uncertainty_radius_km=2.0)
     store.save_prediction(Prediction(
         predicted_at=datetime(2026, 6, 7, 0, 11, tzinfo=timezone.utc),
+        burst_lat=45.2, burst_lon=7.3, burst_alt=31000.0,
         path=[(1.0, 1.0, 5000.0), (2.0, 2.0, 0.0)], **base))
     store.save_prediction(Prediction(
         predicted_at=datetime(2026, 6, 7, 0, 12, tzinfo=timezone.utc),
@@ -357,6 +392,8 @@ def test_prediction_path_upserts_latest(store):
     rows = store.latest_paths_for_active()
     assert len(rows) == 1                          # one row per flight (upsert)
     assert rows[0]["path"][0] == [9.0, 9.0, 5000.0]  # newest path won
+    # the descent path replaced the pre-burst one: its burst point is gone too
+    assert rows[0]["burst_lat"] is None and rows[0]["burst_alt"] is None
 
 
 def test_landing_record_and_accuracy_inputs(store):

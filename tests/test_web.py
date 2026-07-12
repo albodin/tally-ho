@@ -512,6 +512,30 @@ def test_map_includes_flown_track(client):
     # store [lat, lon, alt] → GeoJSON [lon, lat], launch point first
     assert track[0]["geometry"]["coordinates"][0] == [7.0, 45.0]
     assert track[0]["properties"]["serial"] == "S1"
+    # S1 has a recorded burst → the track carries the observed burst point:
+    # placed at the apogee breadcrumb, altitude from the recorded burst_alt
+    assert track[0]["properties"]["burst_lat"] == 45.05
+    assert track[0]["properties"]["burst_lon"] == 7.1
+    assert track[0]["properties"]["burst_alt"] == 30000.0
+
+
+def test_map_track_without_recorded_burst_has_no_burst_point(client):
+    store = client.store
+    day = date(2026, 6, 7)
+    # still ascending: no burst recorded, so no burst marker on its track
+    store.upsert_flight({
+        "serial": "A1", "launch_day": day.isoformat(), "type": "RS41",
+        "state": "ASCENT", "first_seen": "2026-06-07T00:00:00+00:00",
+        "last_seen": "2026-06-07T00:10:00+00:00", "launch_lat": 45.0,
+        "launch_lon": 7.0, "burst_alt": None, "max_alt": 9000.0,
+        "last_lat": 45.05, "last_lon": 7.1, "last_alt": 9000.0,
+    })
+    for t, lat, lon, alt in [(0.0, 45.0, 7.0, 200.0), (60.0, 45.05, 7.1, 9000.0)]:
+        store.append_track_point("A1", day, t, lat, lon, alt)
+
+    fc = client.get("/api/map").json()
+    track = [f for f in fc["features"] if f["properties"]["kind"] == "track"][0]
+    assert "burst_lat" not in track["properties"]
 
 
 def test_map_includes_predicted_path_and_landing(client):
@@ -541,11 +565,39 @@ def test_map_includes_predicted_path_and_landing(client):
     # [lat, lon, alt] in store → [lon, lat] in GeoJSON
     assert path["geometry"]["coordinates"][0] == [7.2, 45.1]
     assert path["properties"]["serial"] == "S1"
+    # a descent prediction has no predicted burst point
+    assert "burst_lat" not in path["properties"]
 
     landing = by_kind["landing"][0]
     assert landing["geometry"]["coordinates"] == [8.0, 46.0]
     assert landing["properties"]["serial"] == "S2"
     assert landing["properties"]["detected_by"] == "telemetry"
+
+
+def test_map_preburst_path_carries_predicted_burst(client):
+    store = client.store
+    day = date(2026, 6, 7)
+    store.upsert_flight({
+        "serial": "A1", "launch_day": day.isoformat(), "type": "RS41",
+        "state": "ASCENT", "first_seen": "2026-06-07T00:00:00+00:00",
+        "last_seen": "2026-06-07T00:10:00+00:00", "launch_lat": 45.0,
+        "launch_lon": 7.0, "burst_alt": None, "max_alt": 9000.0,
+        "last_lat": 45.05, "last_lon": 7.1, "last_alt": 9000.0,
+    })
+    store.save_prediction(Prediction(
+        serial="A1", launch_day=day,
+        predicted_at=datetime(2026, 6, 7, 0, 12, tzinfo=timezone.utc),
+        land_lat=45.5, land_lon=7.6,
+        land_eta=datetime(2026, 6, 7, 1, 40, tzinfo=timezone.utc),
+        source=PredictionSource.GFS, uncertainty_radius_km=12.0,
+        burst_lat=45.2, burst_lon=7.3, burst_alt=31000.0,
+        path=[(45.05, 7.1, 9000.0), (45.2, 7.3, 31000.0), (45.5, 7.6, 200.0)]))
+
+    fc = client.get("/api/map").json()
+    path = [f for f in fc["features"] if f["properties"]["kind"] == "path"][0]
+    assert path["properties"]["burst_lat"] == 45.2
+    assert path["properties"]["burst_lon"] == 7.3
+    assert path["properties"]["burst_alt"] == 31000.0
 
 
 def test_map_track_extends_to_live_fix(client):
@@ -736,7 +788,7 @@ def test_history_landed_scores_vs_actual_landing(client):
     store = client.store
     day = date(2026, 6, 7)
     store.upsert_flight({"serial": "L1", "launch_day": day.isoformat(),
-                         "state": "LANDED", "type": "RS41"})
+                         "state": "LANDED", "type": "RS41", "burst_alt": 9500.0})
     _save_pred(store, "L1", day, 10, 45.9, 7.6, alt=9000.0)
     _save_pred(store, "L1", day, 39, 45.51, 7.6, alt=500.0)
     store.record_landing("L1", day, land_lat=45.5, land_lon=7.6, land_alt=210.0,
@@ -751,6 +803,9 @@ def test_history_landed_scores_vs_actual_landing(client):
     assert body["landing"]["land_lat"] == 45.5
     # landed flight ships its flown track (nothing else draws it on the map)
     assert body["track"][0] == [45.0, 7.0, 200.0]
+    # ... and its observed burst point: the apogee breadcrumb, at the
+    # recorded burst altitude
+    assert body["burst"] == {"lat": 45.3, "lon": 7.3, "alt": 9500.0}
     preds = body["predictions"]
     assert preds[0]["distance_km"] == pytest.approx(haversine_km(45.9, 7.6, 45.5, 7.6))
     assert preds[-1]["distance_km"] == pytest.approx(haversine_km(45.51, 7.6, 45.5, 7.6))
@@ -763,6 +818,7 @@ def test_history_flight_without_predictions(client):
     assert body["predictions"] == []
     assert body["distance_reference"] is None
     assert body["landing"] is None
+    assert body["burst"] is None   # no track shipped, no recorded burst
 
 
 def test_history_etag_lets_unchanged_polls_revalidate(client):

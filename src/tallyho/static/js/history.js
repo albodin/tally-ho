@@ -3,7 +3,7 @@
 // the current latest prediction (drift) - the backend picks and reports which.
 import { $, api, cssVar, esc, fnum, hhmm } from "./util.js";
 import { LANDING_STYLE, SOURCE_COLOR, TRACK_COLOR, WARN_COLOR,
-         historyLayer, map, predIcon } from "./map.js";
+         burstIcon, historyLayer, map, predIcon } from "./map.js";
 
 const LINE = cssVar("--line"), MUTED = cssVar("--muted"),
       ACCENT = cssVar("--accent"), BAD = cssVar("--bad");
@@ -104,6 +104,14 @@ function drawHistoryOverlay(d) {
     // flown track of a LANDED flight - active flights' tracks are already on the map
     L.polyline(d.track.map(p => [p[0], p[1]]), { color: TRACK_COLOR, weight:2, opacity:.85 })
       .bindPopup(`<b>${esc(d.serial)}</b> flown track`).addTo(historyLayer);
+  }
+  if (d.burst) {
+    // where the ascent actually ended (the track's apogee)
+    L.marker([d.burst.lat, d.burst.lon], { icon: burstIcon })
+      .bindTooltip(`burst · ${fnum(d.burst.alt,0)} m`).bindPopup(
+      `<b>${esc(d.serial)}</b> burst<br>${fnum(d.burst.lat,5)}, ${fnum(d.burst.lon,5)}`
+      + `<br>${fnum(d.burst.alt,0)} m`
+    ).addTo(historyLayer);
   }
   if (n > 1)
     L.polyline(preds.map(p => [p.land_lat, p.land_lon]),

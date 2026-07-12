@@ -86,6 +86,12 @@ const targetSvg =
     <circle cx="13" cy="13" r="3.2" fill="#ffb454"/>
     <path d="M13 1 v5 M13 20 v5 M1 13 h5 M20 13 h5" stroke="#ffb454" stroke-width="2" stroke-linecap="round"/>
   </svg>`;
+// balloon-pop starburst, marking where the ascent ends and the fall begins
+const burstSvg = (fill, stroke) =>
+  `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 18 18">
+    <path d="M9 1 L10.3 5.8 L14.7 3.3 L12.2 7.7 L17 9 L12.2 10.3 L14.7 14.7 L10.3 12.2 L9 17 L7.7 12.2 L3.3 14.7 L5.8 10.3 L1 9 L5.8 7.7 L3.3 3.3 L7.7 5.8 Z"
+          fill="${fill}" stroke="${stroke}" stroke-width="1" stroke-linejoin="round"/>
+  </svg>`;
 const FLIGHT_ICONS = {
   ASCENT: svgIcon(balloonSvg("#e5484d", "#8c1d22"), 24, 30, [12, 26], [0, -24]),
   FLOAT:  svgIcon(balloonSvg("#a78bfa", "#6d4fc4"), 24, 30, [12, 26], [0, -24]),
@@ -96,6 +102,11 @@ const flightIcon = (state) => FLIGHT_ICONS[state] || FLIGHT_ICONS.ASCENT;
 const launchIcon = svgIcon(rocketSvg, 22, 30, [11, 28], [0, -26]);
 // predicted landing spot - a crosshair, not Leaflet's oversized default pin
 export const predIcon = svgIcon(targetSvg, 26, 26, [13, 13], [0, -12]);
+// burst markers: solid red pop = observed (on the flown track / history
+// overlay); hollow orange = predicted (on the dashed pre-burst path, matching
+// the crosshair's palette)
+export const burstIcon = svgIcon(burstSvg("#e5484d", "#8c1d22"), 18, 18, [9, 9], [0, -8]);
+const predBurstIcon = svgIcon(burstSvg("rgba(255,180,84,.3)", "#ffb454"), 18, 18, [9, 9], [0, -8]);
 
 let didFit = false;
 let lastMapJson = "";
@@ -118,6 +129,12 @@ export async function refreshMap() {
       L.polyline(line, { color: TRACK_COLOR, weight:2, opacity:.85 }).bindPopup(
         `<b>${esc(p.serial)}</b> flown track`
       ).addTo(trackLayer);
+      // observed burst point (the track's apogee), once the tracker called it
+      if (p.burst_lat != null)
+        L.marker([p.burst_lat, p.burst_lon], { icon: burstIcon }).bindPopup(
+          `<b>${esc(p.serial)}</b> burst<br>${fnum(p.burst_lat,5)}, ${fnum(p.burst_lon,5)}`
+          + `<br>${fnum(p.burst_alt,0)} m`
+        ).addTo(trackLayer);
       for (const ll of line) pts.push(ll);
       continue;
     }
@@ -128,6 +145,12 @@ export async function refreshMap() {
         opacity:.8, dashArray:"6,6" }).bindPopup(
         `<b>${esc(p.serial)}</b> predicted path<br>source ${esc(p.source)} · land ${hhmm(p.eta)}`
       ).addTo(pathLayer);
+      // pre-burst paths carry their predicted burst point (~ marks an estimate)
+      if (p.burst_lat != null)
+        L.marker([p.burst_lat, p.burst_lon], { icon: predBurstIcon }).bindPopup(
+          `<b>${esc(p.serial)}</b> predicted burst<br>${fnum(p.burst_lat,5)}, ${fnum(p.burst_lon,5)}`
+          + `<br>~${fnum(p.burst_alt,0)} m`
+        ).addTo(pathLayer);
       for (const ll of line) pts.push(ll);
       continue;
     }

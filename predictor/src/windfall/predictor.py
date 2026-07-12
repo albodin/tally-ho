@@ -281,7 +281,9 @@ class Predictor:
             serial=flight.serial, launch_day=flight.launch_day,
             predicted_at=now or when, land_lat=land_lat, land_lon=land_lon,
             land_eta=landing.eta, source=source, uncertainty_radius_km=radius,
-            alt_at_pred=flight.last_alt, path=path,
+            alt_at_pred=flight.last_alt,
+            burst_lat=b_lat, burst_lon=b_lon, burst_alt=burst_alt,
+            path=path,
         )
 
     # ---- internals --------------------------------------------------------

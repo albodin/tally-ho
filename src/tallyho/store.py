@@ -97,7 +97,8 @@ CREATE INDEX IF NOT EXISTS idx_pred_flight
 
 -- Latest predicted trajectory per flight, for the map (one row per flight, the
 -- newest path wins). Kept out of the predictions time-series to keep that table
--- lean for the accuracy harness.
+-- lean for the accuracy harness. burst_lat/lon/alt is the predicted burst point
+-- of a pre-burst path (where the ascent leg tops out); NULL on descent paths.
 CREATE TABLE IF NOT EXISTS prediction_paths (
     serial       TEXT NOT NULL,
     launch_day   TEXT NOT NULL,
@@ -105,6 +106,9 @@ CREATE TABLE IF NOT EXISTS prediction_paths (
     source       TEXT NOT NULL,
     land_eta     TEXT,
     path_json    TEXT NOT NULL,
+    burst_lat    REAL,
+    burst_lon    REAL,
+    burst_alt    REAL,
     PRIMARY KEY (serial, launch_day)
 );
 
@@ -168,9 +172,21 @@ CREATE TABLE IF NOT EXISTS kv (
 # (existing databases replay it). A migration is the SQL upgrading from the
 # previous version, or a callable taking the connection when it needs Python
 # (data backfills, table rebuilds).
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
+
+
+def _migrate_v2_path_burst(conn: sqlite3.Connection) -> None:
+    """prediction_paths gains the predicted burst point. Column-tolerant: a
+    pre-versioning database is adopted at v1 and replays this even when its
+    actual shape is already current (see :meth:`Store._apply_schema`)."""
+    have = {r[1] for r in conn.execute("PRAGMA table_info(prediction_paths)")}
+    for col in ("burst_lat", "burst_lon", "burst_alt"):
+        if col not in have:
+            conn.execute(f"ALTER TABLE prediction_paths ADD COLUMN {col} REAL")
+
+
 _MIGRATIONS: dict[int, str | Callable[[sqlite3.Connection], None]] = {
-    # 2: "ALTER TABLE flights ADD COLUMN example REAL",
+    2: _migrate_v2_path_burst,
 }
 
 
@@ -262,9 +278,11 @@ class Store:
 
     def _apply_schema(self) -> None:
         """Create or upgrade the schema, one version at a time. Version 0 means
-        a fresh file - or one from before versioning, whose shape already
-        matches the v1 baseline - so it gets _SCHEMA (all IF NOT EXISTS) and is
-        stamped current. The stamp advances per migration, so a failure partway
+        a fresh file - which gets _SCHEMA (the latest shape) and is stamped
+        current - or one from before versioning, whose shape matched the v1
+        baseline: that one is adopted at v1 and replays the later migrations
+        (which must therefore tolerate a v0 file that was fabricated from a
+        newer shape). The stamp advances per migration, so a failure partway
         resumes from the last completed step on the next open."""
         v = self._conn.execute("PRAGMA user_version").fetchone()[0]
         if v > _SCHEMA_VERSION:
@@ -272,8 +290,11 @@ class Store:
                 f"{self.path} has schema version {v}, newer than this build's "
                 f"{_SCHEMA_VERSION} - upgrade tally-ho or restore the matching database")
         if v == 0:
+            fresh = self._conn.execute(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' "
+                "AND name='flights'").fetchone()[0] == 0
             self._conn.executescript(_SCHEMA)
-            v = _SCHEMA_VERSION
+            v = _SCHEMA_VERSION if fresh else 1
         for n in range(v + 1, _SCHEMA_VERSION + 1):
             step = _MIGRATIONS[n]
             if callable(step):
@@ -434,17 +455,23 @@ class Store:
             self.save_prediction_path(pred)
 
     def save_prediction_path(self, pred: Prediction) -> None:
-        """Upsert the newest predicted trajectory for a flight (for the map)."""
+        """Upsert the newest predicted trajectory for a flight (for the map).
+        The predicted burst point rides along (NULLed on descent paths, so the
+        marker disappears once the real burst happens)."""
         with self._lock:
             self._conn.execute(
                 "INSERT INTO prediction_paths (serial, launch_day, predicted_at, "
-                "source, land_eta, path_json) VALUES (?, ?, ?, ?, ?, ?) "
+                "source, land_eta, path_json, burst_lat, burst_lon, burst_alt) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(serial, launch_day) DO UPDATE SET "
                 "predicted_at=excluded.predicted_at, source=excluded.source, "
-                "land_eta=excluded.land_eta, path_json=excluded.path_json",
+                "land_eta=excluded.land_eta, path_json=excluded.path_json, "
+                "burst_lat=excluded.burst_lat, burst_lon=excluded.burst_lon, "
+                "burst_alt=excluded.burst_alt",
                 (pred.serial, pred.launch_day.isoformat(), pred.predicted_at.isoformat(),
                  pred.source.value, _iso(pred.land_eta),
-                 json.dumps([list(p) for p in pred.path])),
+                 json.dumps([list(p) for p in pred.path]),
+                 pred.burst_lat, pred.burst_lon, pred.burst_alt),
             )
             self._commit("flights")
 

@@ -129,6 +129,13 @@ class Prediction:
     # accuracy harness bucket error by altitude-at-prediction on live data
     # exactly as the offline replay does. Optional/back-compatible.
     alt_at_pred: float | None = None
+    # Predicted burst point (pre-burst predictions only): where the modelled
+    # ascent leg tops out before the descent. None once the flight is already
+    # descending - its burst is observed, not predicted. Rides with the path
+    # into ``prediction_paths`` (not the predictions time-series row).
+    burst_lat: float | None = None
+    burst_lon: float | None = None
+    burst_alt: float | None = None
     # Sampled predicted trajectory (current position → landing) for the map.
     # Not persisted in the predictions row; the latest path is upserted into the
     # separate ``prediction_paths`` table by the store.

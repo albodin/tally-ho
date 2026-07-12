@@ -109,6 +109,21 @@ def _clean(x):
     return x
 
 
+def _track_burst(track: list, burst_alt: float | None) -> dict | None:
+    """The observed burst point of a flown track: its apogee breadcrumb, shown
+    only when the tracker actually recorded a burst (``burst_alt`` set; a
+    flight caught mid-descent never gets one). The breadcrumb marks where it
+    happened; the reported altitude is the recorded ``burst_alt`` - the true
+    apogee, which downsampling may have thinned out of the track."""
+    if burst_alt is None:
+        return None
+    top = max((p for p in track if p[2] is not None),
+              key=lambda p: p[2], default=None)
+    if top is None:
+        return None
+    return {"lat": top[0], "lon": top[1], "alt": burst_alt}
+
+
 def _metrics_json(m) -> dict:
     """Serialize :class:`windfall.replay.Metrics` to a JSON-safe dict."""
     return {
@@ -388,6 +403,7 @@ def create_app(cfg: Config, store: Store, ntfy_sink=None, bus=None,
         } for p in preds]
         # Active flights' flown tracks are already on the map (refreshMap); ship
         # the track only for LANDED flights, whose track nothing else draws.
+        # The observed burst point rides along for the overlay's burst marker.
         track = ([[t["lat"], t["lon"], t["alt"]]
                   for t in store.track_for(serial, launch_day)]
                  if flight["state"] == "LANDED" else [])
@@ -398,6 +414,7 @@ def create_app(cfg: Config, store: Store, ntfy_sink=None, bus=None,
             "landing": landing,
             "distance_reference": reference,
             "track": track,
+            "burst": _track_burst(track, flight["burst_alt"]),
             "predictions": out_preds,
         }
         # Serialize once so the ETag is a hash of the exact bytes served
@@ -438,7 +455,10 @@ def create_app(cfg: Config, store: Store, ntfy_sink=None, bus=None,
         (current position), ``path`` (the predicted trajectory LineString,
         current position → landing), ``prediction`` (the predicted landing point
         + uncertainty), ``landing`` (actual recorded landing), and ``subscriber``
-        (watched location)."""
+        (watched location). ``track``/``path`` features carry optional
+        ``burst_lat/lon/alt`` properties - the observed burst point (the track's
+        apogee, once a burst was recorded) and the predicted one (from a
+        pre-burst prediction) respectively - for the burst markers."""
         features = []
         # Current fix per active flight, for stitching the track/path lines to
         # the live marker below. The flight row updates every frame, but the
@@ -446,7 +466,9 @@ def create_app(cfg: Config, store: Store, ntfy_sink=None, bus=None,
         # snapshot from the last prediction run - drawn as stored, both lines
         # visibly trail/miss the marker.
         live_fix: dict[tuple, list] = {}
+        flight_rows: dict[tuple, dict] = {}
         for f in store.active_flights():
+            flight_rows[(f["serial"], f["launch_day"])] = f
             if f["launch_lat"] is not None and f["launch_lon"] is not None:
                 features.append({
                     "type": "Feature",
@@ -477,10 +499,16 @@ def create_app(cfg: Config, store: Store, ntfy_sink=None, bus=None,
                 coords.append(fix)
             if len(coords) < 2:
                 continue
+            props = {"kind": "track", "serial": tr["serial"]}
+            frow = flight_rows.get((tr["serial"], tr["launch_day"]))
+            burst = _track_burst(tr["track"], frow["burst_alt"] if frow else None)
+            if burst is not None:
+                props.update(burst_lat=burst["lat"], burst_lon=burst["lon"],
+                             burst_alt=burst["alt"])
             features.append({
                 "type": "Feature",
                 "geometry": {"type": "LineString", "coordinates": coords},
-                "properties": {"kind": "track", "serial": tr["serial"]},
+                "properties": props,
             })
         for pp in store.latest_paths_for_active():
             # path rows store [lat, lon, alt]; GeoJSON wants [lon, lat]
@@ -493,13 +521,17 @@ def create_app(cfg: Config, store: Store, ntfy_sink=None, bus=None,
                 coords[0] = fix
             if len(coords) < 2:
                 continue
+            props = {
+                "kind": "path", "serial": pp["serial"], "source": pp["source"],
+                "eta": pp["land_eta"],
+            }
+            if pp["burst_lat"] is not None and pp["burst_lon"] is not None:
+                props.update(burst_lat=pp["burst_lat"], burst_lon=pp["burst_lon"],
+                             burst_alt=pp["burst_alt"])
             features.append({
                 "type": "Feature",
                 "geometry": {"type": "LineString", "coordinates": coords},
-                "properties": {
-                    "kind": "path", "serial": pp["serial"], "source": pp["source"],
-                    "eta": pp["land_eta"],
-                },
+                "properties": props,
             })
         for p in store.latest_predictions_for_active():
             features.append({
