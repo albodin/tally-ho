@@ -8,7 +8,9 @@ Two public, no-auth sources:
   hundreds of metres AGL, so the true landing sits further downwind).
 * **Telemetry archive** - the ``sondehub-history`` S3 bucket holds every frame
   SondeHub ever heard, one gzipped JSON file per serial
-  (``serial/<serial>.json.gz``).
+  (``serial/<serial>.json.gz``). It lags live flights by hours; for a sonde
+  still in the air use :func:`fetch_live_telemetry` (the ES-backed
+  ``/sonde/<serial>`` endpoint) instead.
 
 :func:`download_corpus` joins the two into a local directory of flight files
 (``<serial>.json`` = ``{"recovery": {...}, "frames": [...]}``) that the
@@ -44,6 +46,7 @@ log = logging.getLogger(__name__)
 
 RECOVERED_URL = "https://api.v2.sondehub.org/recovered"
 SERIAL_URL = "https://sondehub-history.s3.amazonaws.com/serial/{serial}.json.gz"
+LIVE_SERIAL_URL = "https://api.v2.sondehub.org/sonde/{serial}"
 
 
 def fetch_recovered(
@@ -81,6 +84,25 @@ def fetch_telemetry(serial: str, timeout: float = 60.0) -> list[dict] | None:  #
             return None
         raise
     return json.loads(gzip.decompress(data))
+
+
+def fetch_live_telemetry(serial: str, timeout: float = 60.0) -> list[dict] | None:  # pragma: no cover - network
+    """Frame history for one serial from the live SondeHub API.
+
+    Unlike the S3 archive (:func:`fetch_telemetry`, which lags by hours), this
+    covers flights still in the air - it is what backfills a sonde first heard
+    mid-flight. The endpoint 302s to a generated S3 export; urllib follows the
+    redirect. Returns the raw frame dicts (MQTT shape), or None if SondeHub
+    doesn't know the serial."""
+    url = LIVE_SERIAL_URL.format(serial=urllib.parse.quote(serial))
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            data = resp.read()
+    except urllib.error.HTTPError as e:
+        if e.code in (403, 404):
+            return None
+        raise
+    return json.loads(data)
 
 
 @dataclass(slots=True)

@@ -284,6 +284,18 @@ class FlightTracker:
                 out.append((flight, TrackerEvent.EXPIRED))
         return out
 
+    def forget(self, serial: str) -> Flight | None:
+        """Remove a serial's active flight from memory without persisting
+        anything - unlike :meth:`drop`, which closes the flight out as LANDED.
+        For callers about to *rebuild* the flight (e.g. replaying fetched
+        history through :meth:`update`): the provisional in-memory state simply
+        vanishes, and any rows already persisted are the caller's to clean up.
+        Returns the removed flight, or None if the serial wasn't tracked."""
+        key = self._active_key.pop(serial, None)
+        if key is None:
+            return None
+        return self.flights.pop(key, None)
+
     def drop(self, flight: Flight) -> None:
         """Close out a flight immediately and evict it from memory - e.g. it
         left the caller's region of interest (the tracker itself has no

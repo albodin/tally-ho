@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from windfall.climatology import Climatology
+from .backfill import HistoryFetcher, merge_history
 from .config import Config
 from windfall.dem import ReloadableGround, download_dem_tiles
 from .geofence import build_capture_roi, in_capture_roi
@@ -38,6 +39,7 @@ class App:
         sink: NtfySink | None = None,
         gfs_source: GFSWindSource | None = None,
         config_path: str | Path | None = None,
+        backfill_fetch_fn=None,
     ):
         self.cfg = cfg
         # the config.toml behind cfg; the in-app web UI's settings editor
@@ -70,6 +72,13 @@ class App:
         # sonde-time of the last saved prediction per descending flight - the
         # per-frame throttle (see PredictConfig.descent_predict_seconds)
         self._last_pred_t: dict[tuple, float] = {}
+        # First-detection history backfill: a sonde first heard mid-air gets its
+        # missed frames fetched from SondeHub (worker thread) and its flight
+        # rebuilt on this thread - see apply_backfills(). One attempt per flight;
+        # live frames heard while a fetch runs are buffered for the rebuild.
+        self._backfill = HistoryFetcher(cfg.ingest, fetch_fn=backfill_fetch_fn)
+        self._backfill_requested: set[tuple] = set()
+        self._backfill_buffer: dict[str, list[Frame]] = {}
         self._gfs_stop = threading.Event()
         # ROI-change wake-ups: a new/moved location kicks the ROI-dependent
         # downloaders immediately instead of waiting out their cadences (GFS
@@ -134,6 +143,14 @@ class App:
 
         flight, events = self.tracker.update(frame)
 
+        if TrackerEvent.NEW_FLIGHT in events:
+            self._maybe_backfill(flight, frame)
+        elif frame.serial in self._backfill_buffer:
+            # heard while this serial's history fetch runs: keep for the rebuild
+            buf = self._backfill_buffer[frame.serial]
+            if len(buf) < 5000:   # a fetch is seconds; cap a stuck worker's cost
+                buf.append(frame)
+
         if TrackerEvent.LANDED in events:
             self._record_landing(flight, now=flight.last_seen, detected_by="telemetry")
             self.alerts.handle_landed(flight, self._subscribers, now=flight.last_seen)
@@ -162,6 +179,93 @@ class App:
         if len(self._last_pred_t) > 4096:
             self._last_pred_t.clear()
         self._last_pred_t[(flight.serial, flight.launch_day)] = flight.last_t
+
+    # ---- first-detection history backfill ----------------------------------
+    def _maybe_backfill(self, flight, frame: Frame) -> bool:
+        """Queue a SondeHub history fetch for a flight first heard mid-air.
+        First heard near the ground means we have the whole flight already, so
+        there is nothing to fetch (``launch_lat`` is only set on a near-ground
+        first frame)."""
+        if not self.cfg.ingest.backfill_enabled:
+            return False
+        if flight.launch_lat is not None:
+            return False
+        key = (flight.serial, flight.launch_day)
+        if key in self._backfill_requested:
+            return False
+        if len(self._backfill_requested) > 4096:
+            self._backfill_requested.clear()
+        self._backfill_requested.add(key)
+        if not self._backfill.request(flight.serial):
+            return False
+        log.info("%s first heard mid-air at %.0f m; fetching missed history "
+                 "from SondeHub", flight.serial, frame.alt)
+        self._backfill_buffer[flight.serial] = [frame]
+        return True
+
+    def apply_backfills(self) -> int:
+        """Drain completed history fetches and rebuild their flights. Runs on
+        the consumer thread (replay shares the tracker/DEM/predictor with frame
+        processing). Returns the number of flights rebuilt."""
+        rebuilt = 0
+        for serial, raw in self._backfill.drain():
+            live = self._backfill_buffer.pop(serial, [])
+            if not raw:
+                continue
+            try:
+                if self._rebuild_from_history(serial, raw, live):
+                    rebuilt += 1
+            except Exception:  # noqa: BLE001 - a bad rebuild must not kill ingest
+                log.exception("history rebuild for %s failed; keeping the "
+                              "live-only flight", serial)
+        return rebuilt
+
+    def _rebuild_from_history(self, serial: str, raw: list[dict],
+                              live: list[Frame]) -> bool:
+        """Replace a provisional mid-air flight with one rebuilt from its full
+        SondeHub history: forget the in-memory flight, erase its rows, and
+        replay history + buffered live frames through the tracker (launch site,
+        ascent wind profile, burst and descent state all come out real). One
+        prediction/alert pass runs at the end - replay itself stays silent."""
+        flight = self.tracker.get(serial)
+        if flight is None or flight.state == FlightState.LANDED:
+            return False   # dropped (ROI) or resolved while the fetch ran
+        frames = merge_history(raw, live, serial)
+        if not frames or (flight.first_seen is not None
+                          and frames[0].dt >= flight.first_seen):
+            return False   # history adds nothing older than what we heard live
+        log.info("rebuilding %s from %d frame(s) of history (heard live from "
+                 "%s, history from %s)", serial, len(frames),
+                 flight.first_seen, frames[0].dt)
+        self.tracker.forget(serial)
+        self._last_pred_t.pop((serial, flight.launch_day), None)
+
+        landed = False
+        # One transaction + one SSE ping: the rebuilt flight must appear on the
+        # dashboard atomically, not animate through its replayed history (and
+        # thousands of per-frame commits would stall this thread for seconds).
+        with self.store.batch():
+            self.store.delete_flight(serial, flight.launch_day)
+            for f in frames:
+                fl, events = self.tracker.update(f)
+                if TrackerEvent.NEW_FLIGHT in events:
+                    landed = False   # replay can span a reused serial's older flight
+                if TrackerEvent.LANDED in events:
+                    landed = True
+
+        if landed:
+            # the history shows it already came down - close the loop now
+            self._record_landing(fl, now=fl.last_seen, detected_by="telemetry")
+            self.alerts.handle_landed(fl, self._subscribers, now=fl.last_seen)
+        elif fl.state == FlightState.DESCENT:
+            # falling right now: predict immediately off the rebuilt profile
+            pred = self.predictor.predict(fl)
+            if pred is not None:
+                self._mark_predicted(fl)
+                self.store.save_prediction(pred)
+                self.alerts.handle_prediction(fl, pred, self._subscribers,
+                                              now=fl.last_seen)
+        return True
 
     def predict_active(self, now: datetime | None = None) -> int:
         """Refresh pre-burst landing predictions + paths for every sonde still
@@ -361,6 +465,9 @@ class App:
         t = threading.Thread(target=stream.run_forever, name="sondehub", daemon=True)
         t.start()
         log.info("started SondeHub ingest")
+        # always alive (idle when backfill_enabled is off), so the settings
+        # editor can hot-toggle backfill without a thread-start path
+        self._backfill.start()
         self.start_gfs_downloader()
         self.start_hrrr_downloader()
         self.start_dem_downloader()
@@ -379,6 +486,7 @@ class App:
                         processor.handle_raw(raw_q.get_nowait())
                 except queue.Empty:
                     pass
+                self.apply_backfills()
                 now_mono = time.monotonic()
                 if now_mono - last_tick >= self.cfg.tick_seconds:
                     self.tick()
@@ -399,5 +507,6 @@ class App:
         except KeyboardInterrupt:
             log.info("shutting down")
             stream.stop()
+            self._backfill.stop()
             self.stop_gfs_downloader()
             self.stop_web_server()

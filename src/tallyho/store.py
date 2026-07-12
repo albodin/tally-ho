@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from contextlib import contextmanager
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Callable
@@ -209,6 +210,9 @@ class Store:
         # Set by the web lifespan to EventBus.publish so writes ring the SSE
         # doorbell; None (the default) means writes publish nothing.
         self.on_change: Callable[[str], None] | None = None
+        # batch() nesting depth + the change names deferred inside it
+        self._batch_depth = 0
+        self._batch_names: set[str] = set()
         with self._lock:
             self._apply_schema()
 
@@ -216,6 +220,38 @@ class Store:
         cb = self.on_change            # read once; may be reassigned from another thread
         if cb is not None:
             cb(name)                   # must be thread-safe; EventBus.publish is
+
+    def _commit(self, *names: str) -> None:
+        """Commit and ring the SSE doorbell for ``names`` - or, inside
+        :meth:`batch`, defer both to the batch exit. Call under ``self._lock``."""
+        if self._batch_depth:
+            self._batch_names.update(names)
+            return
+        self._conn.commit()
+        for name in names:
+            self._changed(name)
+
+    @contextmanager
+    def batch(self):
+        """Coalesce many writes into ONE transaction and one change ping per
+        name. Holds the write lock throughout, so readers (and SSE clients)
+        see the whole batch appear atomically - a multi-thousand-frame history
+        replay (see tallyho.backfill) neither animates across the dashboard
+        nor pays per-frame fsyncs. Writes inside must go through
+        :meth:`_commit` (the flight-lifecycle methods all do). The commit runs
+        even if the body raises, keeping the rows consistent with whatever
+        in-memory state the caller built before failing."""
+        with self._lock:
+            self._batch_depth += 1
+            try:
+                yield
+            finally:
+                self._batch_depth -= 1
+                if self._batch_depth == 0:
+                    names, self._batch_names = self._batch_names, set()
+                    self._conn.commit()
+                    for name in names:
+                        self._changed(name)
 
     def data_version(self) -> int:
         """PRAGMA data_version: unchanged by commits on THIS connection, bumped by
@@ -267,8 +303,7 @@ class Store:
         )
         with self._lock:
             self._conn.execute(sql, tuple(row.get(c) for c in cols))
-            self._conn.commit()
-        self._changed("flights")
+            self._commit("flights")
 
     def get_flight(self, serial: str, launch_day: date) -> dict | None:
         with self._lock:
@@ -293,6 +328,22 @@ class Store:
         with self._lock:
             cur = self._conn.execute(sql, (int(limit),))
             return [dict(r) for r in cur.fetchall()]
+
+    def delete_flight(self, serial: str, launch_day: date) -> None:
+        """Erase one flight's rows - flight, wind profile, descent samples,
+        flown track, predictions and path. For a provisional flight about to be
+        rebuilt from backfilled history (whose launch_day may shift to the true
+        launch date, orphaning these rows). Landings and alert de-dup rows are
+        kept: no landing exists for an in-air flight, and deleting an alert row
+        would re-send its push."""
+        with self._lock:
+            for table in ("flights", "wind_profiles", "descent_samples",
+                          "flight_track", "predictions", "prediction_paths"):
+                self._conn.execute(
+                    f"DELETE FROM {table} WHERE serial=? AND launch_day=?",
+                    (serial, launch_day.isoformat()),
+                )
+            self._commit("flights")
 
     # ---- climatology (learned priors) -------------------------------------
     def site_burst_alts(
@@ -335,7 +386,7 @@ class Store:
                 "DO UPDATE SET profile_json=excluded.profile_json",
                 (serial, launch_day.isoformat(), json.dumps(profile_json)),
             )
-            self._conn.commit()
+            self._commit()
 
     def load_profile(self, serial: str, launch_day: date) -> dict | None:
         with self._lock:
@@ -355,7 +406,7 @@ class Store:
                 "DO UPDATE SET samples_json=excluded.samples_json",
                 (serial, launch_day.isoformat(), json.dumps(samples)),
             )
-            self._conn.commit()
+            self._commit()
 
     def load_descent_samples(self, serial: str, launch_day: date) -> list | None:
         with self._lock:
@@ -377,8 +428,7 @@ class Store:
                 ":land_eta, :source, :uncertainty_radius_km, :alt_at_pred)",
                 r,
             )
-            self._conn.commit()
-        self._changed("flights")
+            self._commit("flights")
         # The predicted trajectory rides along in a separate latest-only table.
         if pred.path:
             self.save_prediction_path(pred)
@@ -396,8 +446,7 @@ class Store:
                  pred.source.value, _iso(pred.land_eta),
                  json.dumps([list(p) for p in pred.path])),
             )
-            self._conn.commit()
-        self._changed("flights")
+            self._commit("flights")
 
     def latest_prediction(self, serial: str, launch_day: date) -> dict | None:
         with self._lock:
@@ -461,8 +510,7 @@ class Store:
                 "VALUES (?, ?, ?, ?, ?, ?)",
                 (serial, launch_day.isoformat(), t, lat, lon, alt),
             )
-            self._conn.commit()
-        self._changed("flights")
+            self._commit("flights")
 
     def track_for(self, serial: str, launch_day: date) -> list[dict]:
         """The full flown track for one flight, oldest point first."""
@@ -511,8 +559,7 @@ class Store:
                 (serial, launch_day.isoformat(), land_lat, land_lon, land_alt,
                  _iso(landed_at), detected_by),
             )
-            self._conn.commit()
-        self._changed("accuracy")
+            self._commit("accuracy")
 
     def get_landing(self, serial: str, launch_day: date) -> dict | None:
         with self._lock:

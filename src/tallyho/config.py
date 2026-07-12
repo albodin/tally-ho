@@ -45,6 +45,11 @@ class IngestConfig:
     reconnect_base_seconds: float = 1.0    # exponential backoff base
     reconnect_max_seconds: float = 120.0   # backoff ceiling
     reconnect_jitter: float = 0.3          # +/- fraction jitter
+    # A sonde first heard mid-air is missing its ascent (wind profile, launch
+    # site, burst context) and predicts poorly until backfilled from SondeHub's
+    # history API - see tallyho.backfill.
+    backfill_enabled: bool = True
+    backfill_timeout_seconds: float = 60.0  # per history fetch
 
 
 @dataclass(slots=True)

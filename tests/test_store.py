@@ -140,6 +140,77 @@ def test_flight_upsert_and_get(store):
     assert len(store.active_flights()) == 1
 
 
+def test_delete_flight_erases_all_rows_for_one_key(store):
+    day, other_day = date(2026, 6, 7), date(2026, 6, 8)
+    for d in (day, other_day):
+        store.upsert_flight({
+            "serial": "S1", "launch_day": d.isoformat(), "type": "RS41",
+            "state": "ASCENT", "first_seen": None, "last_seen": None,
+            "launch_lat": 45.0, "launch_lon": 7.0, "burst_alt": None,
+            "max_alt": 5000.0, "last_lat": 45.1, "last_lon": 7.1, "last_alt": 5000.0,
+        })
+        store.save_profile("S1", d, {"bins": []})
+        store.save_descent_samples("S1", d, [[0.0, 5000.0, 10.0, 0.7]])
+        store.append_track_point("S1", d, 0.0, 45.0, 7.0, 5000.0)
+        store.save_prediction(Prediction(
+            serial="S1", launch_day=d,
+            predicted_at=datetime(2026, 6, 7, 1, 0, tzinfo=timezone.utc),
+            land_lat=45.5, land_lon=7.5,
+            land_eta=datetime(2026, 6, 7, 1, 30, tzinfo=timezone.utc),
+            source=PredictionSource.MEASURED, uncertainty_radius_km=2.0,
+        ))
+
+    store.delete_flight("S1", day)
+    assert store.get_flight("S1", day) is None
+    assert store.load_profile("S1", day) is None
+    assert store.load_descent_samples("S1", day) is None
+    assert store.track_for("S1", day) == []
+    assert store.latest_prediction("S1", day) is None
+    # the other launch_day of the same serial is untouched
+    assert store.get_flight("S1", other_day) is not None
+    assert store.load_profile("S1", other_day) is not None
+    assert store.latest_prediction("S1", other_day) is not None
+
+
+def test_batch_coalesces_commits_and_change_pings(store):
+    pings = []
+    store.on_change = pings.append
+    day = date(2026, 6, 7)
+    row = {
+        "serial": "B1", "launch_day": day.isoformat(), "type": "RS41",
+        "state": "ASCENT", "first_seen": None, "last_seen": None,
+        "launch_lat": 45.0, "launch_lon": 7.0, "burst_alt": None,
+        "max_alt": 5000.0, "last_lat": 45.1, "last_lon": 7.1, "last_alt": 5000.0,
+    }
+    with store.batch():
+        for i in range(50):
+            store.upsert_flight(row)
+            store.append_track_point("B1", day, float(i), 45.0, 7.0, 5000.0)
+        store.record_landing("B1", day, 45.2, 7.2, 200.0,
+                             datetime(2026, 6, 7, 2, 0, tzinfo=timezone.utc), "telemetry")
+        assert pings == []                     # everything deferred...
+    assert sorted(pings) == ["accuracy", "flights"]   # ...then once per name
+    assert store.get_flight("B1", day) is not None
+    assert len(store.track_for("B1", day)) == 50
+
+    # a raising body still commits what it wrote (rows match in-memory state)
+    pings.clear()
+    with pytest.raises(RuntimeError):
+        with store.batch():
+            store.upsert_flight(dict(row, state="DESCENT"))
+            raise RuntimeError("mid-batch failure")
+    assert store.get_flight("B1", day)["state"] == "DESCENT"
+    assert pings == ["flights"]
+
+    # nested batches defer to the outermost exit
+    pings.clear()
+    with store.batch():
+        with store.batch():
+            store.upsert_flight(row)
+        assert pings == []
+    assert pings == ["flights"]
+
+
 def test_profile_roundtrip(store):
     prof = {"bin_size_m": 150.0, "bins": [{"alt": 1000, "u": 5, "v": 1, "rho": 0.9, "n": 3}]}
     store.save_profile("S1", date(2026, 6, 7), prof)

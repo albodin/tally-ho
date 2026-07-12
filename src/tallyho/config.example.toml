@@ -31,6 +31,8 @@
 # reconnect_base_seconds = 1.0      # exponential backoff base
 # reconnect_max_seconds = 120.0
 # reconnect_jitter = 0.3
+# backfill_enabled = true           # sonde first heard mid-air: fetch the frames we missed from SondeHub
+# backfill_timeout_seconds = 60.0   # per history fetch
 
 [tracker]
 # burst_drop_m = 300.0              # alt below running max to call burst

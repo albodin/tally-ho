@@ -336,6 +336,31 @@ def test_drop_evicts_flight_without_landing_truth():
     assert fresh is not flight
 
 
+def test_forget_evicts_without_persisting():
+    # forget() = the caller is about to rebuild the flight (e.g. replaying
+    # fetched history): the in-memory state vanishes, but unlike drop() nothing
+    # is written - the persisted row keeps whatever state it had.
+    cfg = Config()
+    store = Store(":memory:")
+    tracker = FlightTracker(cfg, store=store)
+    for s in range(0, 300, 10):
+        flight, _ = tracker.update(_mk(45.0, 7.0, 200.0 + 5 * s, s, s))
+    assert flight.state == FlightState.ASCENT
+
+    gone = tracker.forget("FLOATER")
+    assert gone is flight
+    assert tracker.get("FLOATER") is None
+    assert tracker.flights == {}
+    # not closed out: the store still says ASCENT (cleanup is the caller's job)
+    assert store.get_flight("FLOATER", flight.launch_day)["state"] == "ASCENT"
+    # replaying starts a brand-new flight, ungated by the old one
+    fresh, events = tracker.update(_mk(45.0, 7.0, 200.0, 0, 0))
+    assert TrackerEvent.NEW_FLIGHT in events
+    assert fresh is not flight
+
+    assert tracker.forget("UNKNOWN") is None
+
+
 def test_flown_track_captured_and_downsampled():
     cfg = Config()
     store = Store(":memory:")
