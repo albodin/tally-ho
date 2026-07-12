@@ -29,8 +29,11 @@ import hashlib
 import json
 import logging
 import math
+import os
 import re
 import secrets
+import signal
+import threading
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -38,6 +41,7 @@ from typing import Literal
 
 from windfall.geo import haversine_km
 
+from . import settings_meta
 from .config import Config, display_tz_name
 from .models import Subscriber
 from .store import Store
@@ -47,6 +51,7 @@ log = logging.getLogger(__name__)
 _STATIC = Path(__file__).resolve().parent / "static"
 _INDEX_HTML = _STATIC / "index.html"
 _LOGIN_HTML = _STATIC / "login.html"
+_SETTINGS_HTML = _STATIC / "settings.html"
 
 STATS_TICK = 30.0   # periodic stats doorbell; drives the "last frame age" health line
 
@@ -79,6 +84,21 @@ def heartbeat_age(cfg: Config) -> float | None:
     if last.tzinfo is None:
         last = last.replace(tzinfo=timezone.utc)
     return (datetime.now(timezone.utc) - last).total_seconds()
+
+
+def _trigger_restart(delay: float = 0.5) -> None:
+    """Deliver SIGINT to our own process shortly after the pending response has
+    flushed (build_server's ``timeout_graceful_shutdown`` also drains it).
+
+    Under ``tallyho run`` uvicorn is on a daemon thread and installs no signal
+    handlers, so the signal raises KeyboardInterrupt in the daemon's main loop -
+    its existing clean-shutdown path. Standalone ``tallyho web`` runs uvicorn on
+    the main thread, which treats SIGINT as its own graceful shutdown. Either
+    way the process exits cleanly and a supervisor (docker-compose ``restart:
+    unless-stopped``) starts it back up on the current config.toml."""
+    timer = threading.Timer(delay, lambda: os.kill(os.getpid(), signal.SIGINT))
+    timer.daemon = True
+    timer.start()
 
 
 def _clean(x):
@@ -121,7 +141,8 @@ def _serialize_subscriber(s: Subscriber) -> dict:
     }
 
 
-def create_app(cfg: Config, store: Store, ntfy_sink=None, bus=None):
+def create_app(cfg: Config, store: Store, ntfy_sink=None, bus=None,
+               config_path: str | Path | None = None):
     """Build the FastAPI app. ``store`` is injected so tests can pass an
     in-memory Store and the CLI can pass ``Store(cfg.db_path)``. ``ntfy_sink``
     (an :class:`~tallyho.notify.NtfySink`) is likewise injectable so the
@@ -129,7 +150,9 @@ def create_app(cfg: Config, store: Store, ntfy_sink=None, bus=None):
     ``None`` it lazily builds an :class:`~tallyho.notify.HttpNtfySink`. ``bus``
     (an :class:`~tallyho.events.EventBus`) is injectable so a test can publish
     into the same instance the ``/api/events`` endpoint fans out from; when
-    ``None`` a fresh one is built."""
+    ``None`` a fresh one is built. ``config_path`` is the config.toml the
+    settings editor writes; when ``None`` (embedders/tests that don't wire one)
+    the settings page is read-only."""
     try:
         from fastapi import FastAPI, HTTPException, Request, Response
         from fastapi.responses import FileResponse, JSONResponse
@@ -228,6 +251,12 @@ def create_app(cfg: Config, store: Store, ntfy_sink=None, bus=None):
     @app.get("/login", include_in_schema=False)
     def login_page():
         return FileResponse(str(_LOGIN_HTML), media_type="text/html",
+                            headers={"Cache-Control": "no-store"})
+
+    @app.get("/settings", include_in_schema=False)
+    def settings_page():
+        # not in auth.PUBLIC_PATHS, so RequireSession 302s anonymous visitors
+        return FileResponse(str(_SETTINGS_HTML), media_type="text/html",
                             headers={"Cache-Control": "no-store"})
 
     @app.post("/api/login")
@@ -623,10 +652,84 @@ def create_app(cfg: Config, store: Store, ntfy_sink=None, bus=None):
                     "tokens before relying on alerts.")
         return {"ok": True, "note": note}
 
+    # ---- settings (config.toml editor) + restart ---------------------------
+    # Restart-required keys changed since this process started - the file has
+    # them but a startup-captured consumer doesn't, so the UI keeps showing a
+    # "restart to apply" notice until the process actually restarts.
+    pending_restart: set = set()
+
+    class SettingsIn(BaseModel):
+        # ``values`` is keyed by dotted setting name ("tracker.burst_drop_m",
+        # "db_path"). Validation is manual (settings_meta) rather than pydantic:
+        # the schema is generated from the Config dataclasses, and per-field
+        # error messages must map back to dotted keys for the form.
+        model_config = ConfigDict(extra="forbid")
+        values: dict
+
+    @app.get("/api/settings")
+    def get_settings():
+        """The full config schema (reflected off the Config dataclasses, help
+        text mined from the packaged template) plus the live effective values.
+        Fields overridden by a TALLYHO_* env var are flagged - the environment
+        beats the file, so editing them here would silently do nothing."""
+        body = settings_meta.describe(cfg)
+        body["config_path"] = str(config_path) if config_path is not None else None
+        body["writable"] = config_path is not None
+        body["pending_restart"] = sorted(pending_restart)
+        return body
+
+    @app.put("/api/settings")
+    def put_settings(payload: SettingsIn):
+        """Persist changed settings to config.toml (comment-preserving, via the
+        same tomlkit writer as the setup wizard) and hot-apply them by mutating
+        the live Config object the daemon's components share. Most knobs are
+        read per iteration and take effect immediately; RESTART_REQUIRED ones
+        are captured at startup, so they're written + reported back for the
+        UI's restart notice. Under a standalone ``tallyho web`` process the
+        hot-apply only reaches this process - the daemon picks the file up on
+        its next restart."""
+        if config_path is None:
+            raise HTTPException(
+                status_code=503,
+                detail="settings editing is unavailable: this server was "
+                       "started without a config file path")
+        from .setup import write_config_values
+
+        changed, errors = settings_meta.validate_update(cfg, payload.values)
+        if errors:
+            raise HTTPException(status_code=422, detail={
+                "message": "invalid settings", "errors": errors})
+        if changed:
+            try:
+                # file first (source of truth), then the in-memory overlay
+                write_config_values(config_path, changed)
+            except OSError as exc:
+                raise HTTPException(status_code=500,
+                                    detail=f"could not write {config_path}: {exc}")
+            settings_meta.apply_values(cfg, changed)
+            pending_restart.update(settings_meta.restart_required_in(changed))
+            log.info("settings updated via web UI: %s",
+                     ", ".join(settings_meta.dotted_keys(changed)))
+        return {"ok": True,
+                "changed": settings_meta.dotted_keys(changed),
+                "restart_required": settings_meta.restart_required_in(changed),
+                "pending_restart": sorted(pending_restart)}
+
+    @app.post("/api/restart")
+    def restart():
+        """Cleanly exit the process just after this response flushes, so the
+        supervisor (docker-compose ``restart: unless-stopped``) starts it fresh
+        on the current config.toml. Without a supervisor the process simply
+        stops - the settings page warns about that before calling this."""
+        log.warning("restart requested via web UI")
+        _trigger_restart()
+        return {"ok": True}
+
     return app
 
 
-def build_server(cfg: Config, store: Store, host: str = "127.0.0.1", port: int = 8080):
+def build_server(cfg: Config, store: Store, host: str = "127.0.0.1", port: int = 8080,
+                 config_path: str | Path | None = None):
     """Build a (not-yet-running) ``uvicorn.Server`` for the dashboard, sharing the
     given ``store``. Call ``.run()`` on it to serve - in the main thread for the
     standalone ``tallyho web``, or on a daemon thread inside ``tallyho run`` (the
@@ -637,7 +740,7 @@ def build_server(cfg: Config, store: Store, host: str = "127.0.0.1", port: int =
         raise RuntimeError(
             "the web UI needs uvicorn; install it with: pip install '.[api]'"
         ) from exc
-    app = create_app(cfg, store)
+    app = create_app(cfg, store, config_path=config_path)
     # Bound graceful shutdown so a lingering SSE stream (an in-flight response)
     # can't hold uvicorn open: after 3 s it's dropped and the generator's
     # `finally` still runs. (timeout_keep_alive governs idle connections between
@@ -648,14 +751,17 @@ def build_server(cfg: Config, store: Store, host: str = "127.0.0.1", port: int =
     return uvicorn.Server(config)
 
 
-def run_web(cfg: Config, host: str = "127.0.0.1", port: int = 8080) -> int:  # pragma: no cover - needs network
-    """Run the dashboard with uvicorn as a standalone process (own DB handle)."""
+def run_web(cfg: Config, host: str = "127.0.0.1", port: int = 8080,
+            config_path: str | Path | None = None) -> int:  # pragma: no cover - needs network
+    """Run the dashboard with uvicorn as a standalone process (own DB handle).
+    NOTE: settings saved here reach the daemon (a different process) only via
+    the config file, i.e. on its next restart."""
     store = Store(cfg.db_path)
     if store.count_users() == 0:
         log.error("no account yet - run 'tallyho run' once to complete first-run setup")
         store.close()
         return 2
-    server = build_server(cfg, store, host=host, port=port)
+    server = build_server(cfg, store, host=host, port=port, config_path=config_path)
     log.info("serving tally-ho web UI on http://%s:%d (login required)", host, port)
     server.run()  # blocks until interrupted
     return 0

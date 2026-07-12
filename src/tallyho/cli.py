@@ -155,7 +155,7 @@ def _cmd_run(cfg, config_path) -> int:  # pragma: no cover - needs network
     cfg = ensure_setup(cfg, config_path)
     if cfg is None:
         return 1
-    app = App(cfg)
+    app = App(cfg, config_path=config_path)
     app.run()
     return 0
 
@@ -165,7 +165,7 @@ def _cmd_web(cfg, args) -> int:  # pragma: no cover - needs uvicorn/network
 
     host = args.host or cfg.web.host
     port = args.port or cfg.web.port
-    return run_web(cfg, host=host, port=port)
+    return run_web(cfg, host=host, port=port, config_path=args.config)
 
 
 def _cmd_subscriber(cfg, args) -> int:

@@ -3,8 +3,10 @@
 # tally-ho seeds this file into its data directory on first run (Docker:
 # /data/config.toml, bare metal: data/config.toml). Every setting is shown
 # commented out at its built-in default - uncomment a line to change it, then
-# restart the app to apply. The first-run setup wizard appends its choices as
-# active lines inside the matching sections.
+# restart the app to apply; or edit everything from the web UI's Settings
+# page, which writes this file and applies most changes immediately. The
+# first-run setup wizard appends its choices as active lines inside the
+# matching sections.
 #
 # Any value can also be overridden by an env var TALLYHO_<SECTION>_<KEY>
 # (e.g. TALLYHO_INTEGRATOR_DT_SECONDS=2), or TALLYHO_<KEY> for top-level keys;

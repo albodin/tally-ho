@@ -98,7 +98,7 @@ def test_html_pages_are_no_store(client):
     """The HTML shells must not be browser-cached: "/" swaps from the setup
     wizard to the dashboard after first run, and a heuristically cached page
     survives that switch until a forced reload."""
-    for page in ("/", "/login"):
+    for page in ("/", "/login", "/settings"):
         assert client.get(page).headers["cache-control"] == "no-store", page
 
 
@@ -107,7 +107,7 @@ def test_pages_reference_resolvable_assets(client):
     guards against a renamed/moved CSS or JS file breaking a page."""
     import re
 
-    for page in ("/", "/login"):
+    for page in ("/", "/login", "/settings"):
         html = client.get(page).text
         assets = re.findall(r'(?:href|src)="(/static/[^"]+)"', html)
         assert assets, f"{page} references no static assets?"

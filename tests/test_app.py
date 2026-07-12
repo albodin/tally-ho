@@ -1,6 +1,6 @@
 """End-to-end app pipeline tests - ingest→...→ntfy, offline."""
 
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -367,9 +367,13 @@ def test_health(store):
     app, _ = _app_with_sub(store, f.land_lat, f.land_lon)
     frames = [parse_frame(m) for m in f.frames]
     app.on_frames(frames[:5])
-    last = frames[4].dt
-    assert app.healthy(now=last + timedelta(seconds=10))
-    assert not app.healthy(now=last + timedelta(seconds=10_000))
+    # last_frame_at is the frames' ARRIVAL wall-clock time, not frame.dt -
+    # sonde clock skew (or one garbage future-dated frame) must not stretch
+    # the health window past a real stall.
+    assert app.last_frame_at is not None
+    assert abs((datetime.now(timezone.utc) - app.last_frame_at).total_seconds()) < 5
+    assert app.healthy()
+    assert not app.healthy(now=app.last_frame_at + timedelta(seconds=10_000))
 
 
 def test_roi_change_kicks_downloaders(store):

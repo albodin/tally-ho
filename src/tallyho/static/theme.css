@@ -13,11 +13,15 @@ a:hover { text-decoration:underline; }
 label { display:flex; flex-direction:column; gap:4px; font-size:12px; color:var(--muted); }
 input, select { background:#0d1218; border:1px solid var(--line); color:var(--fg);
         border-radius:6px; padding:8px 9px; font:inherit; }
-button { background:var(--accent); color:#04121f; border:0; border-radius:6px;
-         padding:9px 14px; font:inherit; font-weight:600; cursor:pointer; }
-button.secondary { background:var(--line); color:var(--fg); }
+/* a.btn renders a navigation link as a button (e.g. the header's Settings /
+   Dashboard links), so links and actions sitting side by side match. */
+button, a.btn { background:var(--accent); color:#04121f; border:0; border-radius:6px;
+         padding:9px 14px; font:inherit; font-weight:600; cursor:pointer;
+         display:inline-block; text-decoration:none; }
+a.btn:hover { text-decoration:none; }
+button.secondary, a.btn.secondary { background:var(--line); color:var(--fg); }
 button.danger { background:#3a2226; color:var(--bad); }
-button.tiny { padding:3px 9px; font-size:12px; }
+button.tiny, a.btn.tiny { padding:3px 9px; font-size:12px; }
 button:disabled { opacity:.45; cursor:not-allowed; }
 
 /* Status/error box (#status on the dashboard, #err on login, #msg on setup):

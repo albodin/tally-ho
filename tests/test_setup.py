@@ -46,6 +46,26 @@ def test_write_config_values_preserves_comments(tmp_path):
     assert "# download_cadence_hours = 6.0" in text
 
 
+def test_write_config_values_none_removes_key(tmp_path):
+    """None = delete: TOML has no null, so clearing a key back to "use the
+    default" (e.g. ensemble.seed) must remove its line."""
+    pytest.importorskip("tomlkit")
+    path = tmp_path / "config.toml"
+    seed_config(path)
+
+    write_config_values(path, {"ensemble": {"seed": 123}, "log_level": "DEBUG"})
+    assert load_config(path).ensemble.seed == 123
+
+    write_config_values(path, {"ensemble": {"seed": None}, "log_level": None})
+    cfg = load_config(path)
+    assert cfg.ensemble.seed is None
+    assert cfg.log_level == "INFO"
+    # the active line is gone ("# seed = 12345" - the commented example - stays)
+    assert "seed = 123" not in [l.strip() for l in path.read_text().splitlines()]
+    # deleting a key that was never set is a no-op, not an error
+    write_config_values(path, {"ensemble": {"seed": None}, "log_level": None})
+
+
 # ---- the wizard app ----------------------------------------------------------
 fastapi = pytest.importorskip("fastapi")
 pytest.importorskip("httpx2")

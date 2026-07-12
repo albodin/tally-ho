@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>tally-ho settings</title>
+  <link rel="stylesheet" href="/static/theme.css" />
+  <link rel="stylesheet" href="/static/dashboard.css" />
+  <link rel="stylesheet" href="/static/settings.css" />
+</head>
+<body>
+  <header>
+    <h1>🎈 tally-ho settings</h1>
+    <a class="btn tiny secondary" href="/">← Dashboard</a>
+    <button id="restart" class="tiny danger" style="margin-left:auto" type="button">Restart app</button>
+    <button id="logout" class="tiny secondary" type="button">Sign out</button>
+  </header>
+
+  <main>
+    <div id="status" class="notice"></div>
+    <div id="restart-banner" hidden>
+      <span id="restart-banner-text"></span>
+    </div>
+    <p class="muted" id="intro"></p>
+
+    <div id="sections"></div>
+  </main>
+
+  <div class="savebar" id="savebar" hidden>
+    <span class="muted" id="dirty-count"></span>
+    <button id="revert" class="tiny secondary" type="button">Revert</button>
+    <button id="save" type="button">Save changes</button>
+  </div>
+
+  <div id="restart-overlay" hidden>
+    <div class="card-like">
+      <h2 id="overlay-title">Restarting…</h2>
+      <p class="muted" id="overlay-text">Waiting for the server to come back.</p>
+    </div>
+  </div>
+
+  <script type="module" src="/static/js/settings.js"></script>
+</body>
+</html>

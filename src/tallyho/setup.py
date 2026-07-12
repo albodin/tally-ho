@@ -51,7 +51,9 @@ def seed_config(path: str | Path) -> bool:
 def write_config_values(path: str | Path, values: dict) -> None:
     """Set keys in the config file, preserving everything else (comments
     included). ``values`` maps a section name to a ``{key: value}`` dict, or a
-    top-level key straight to its value."""
+    top-level key straight to its value. A ``None`` value removes the key -
+    TOML has no null, so absence is how "use the default" is spelled (e.g.
+    ``ensemble.seed``)."""
     import tomlkit
 
     p = Path(path)
@@ -60,7 +62,14 @@ def write_config_values(path: str | Path, values: dict) -> None:
         if isinstance(val, dict):
             section = doc.setdefault(key, tomlkit.table())
             for k, v in val.items():
-                section[k] = v
+                if v is None:
+                    if k in section:
+                        del section[k]
+                else:
+                    section[k] = v
+        elif val is None:
+            if key in doc:
+                del doc[key]
         else:
             doc[key] = val
     p.write_text(tomlkit.dumps(doc))

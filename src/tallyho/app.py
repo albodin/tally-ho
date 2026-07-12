@@ -37,8 +37,12 @@ class App:
         store: Store | None = None,
         sink: NtfySink | None = None,
         gfs_source: GFSWindSource | None = None,
+        config_path: str | Path | None = None,
     ):
         self.cfg = cfg
+        # the config.toml behind cfg; the in-app web UI's settings editor
+        # writes it (None = embedders/tests without one -> editor read-only)
+        self.config_path = config_path
         self.store = store or Store(cfg.db_path)
         # Reloadable so tiles the in-app DEM downloader fetches later are picked
         # up by the tracker/predictor (which capture ground_fn here) mid-run.
@@ -121,7 +125,7 @@ class App:
             self.process_frame(f)
 
     def process_frame(self, frame: Frame) -> None:
-        self.last_frame_at = frame.dt
+        self.last_frame_at = datetime.now(timezone.utc)
         # Capture-ROI gate: process flights inside the wide capture box, or any
         # flight we are already tracking.
         already = self.tracker.get(frame.serial) is not None
@@ -317,7 +321,8 @@ class App:
         from .web import build_server
 
         self._web_server = build_server(
-            self.cfg, self.store, host=self.cfg.web.host, port=self.cfg.web.port)
+            self.cfg, self.store, host=self.cfg.web.host, port=self.cfg.web.port,
+            config_path=self.config_path)
         self._web_thread = threading.Thread(
             target=self._web_server.run, name="web-ui", daemon=True)
         self._web_thread.start()
