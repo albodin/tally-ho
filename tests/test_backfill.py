@@ -1,4 +1,5 @@
-"""First-detection history backfill - fetch plumbing and flight rebuilds.
+"""History backfill - fetch plumbing, first-detection and silence-recovery
+flight rebuilds.
 
 All offline: the SondeHub fetch is injected (``App(backfill_fetch_fn=...)``)
 and driven synchronously via ``HistoryFetcher.run_pending()``.
@@ -6,7 +7,7 @@ and driven synchronously via ``HistoryFetcher.run_pending()``.
 
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -281,6 +282,113 @@ def test_rebuild_is_one_atomic_change_not_an_animation(store):
     assert app.apply_backfills() == 1
     assert len(store.track_for("ATOM1", frames[0].dt.date())) > 50
     assert pings.count("flights") == 1
+
+
+# ---- silence recovery (restart with sondes aloft) ---------------------------
+
+def _restart_midflight(store, f, fetch_fn, cut_alt=8000):
+    """Track a flight from launch to ``cut_alt``, then 'restart': a second App
+    on the same store rehydrates it. Returns (app2, sink2, cut frame index)."""
+    frames = [parse_frame(m) for m in f.frames]
+    k = next(i for i, fr in enumerate(frames) if fr.alt > cut_alt)
+    store.add_subscriber(Subscriber(
+        name="alice", lat=f.land_lat, lon=f.land_lon, radius_km=40.0,
+        ntfy_server="https://ntfy.sh", ntfy_topic="alice", ntfy_token_ref="NTFY"))
+    app1 = App(fast_ensemble_cfg(), store=store, sink=FakeNtfySink(),
+               backfill_fetch_fn=lambda s, timeout=None: None)
+    app1.on_frames(frames[:k])                 # ...daemon stops mid-ascent here
+    sink2 = FakeNtfySink()
+    app2 = App(fast_ensemble_cfg(), store=store, sink=sink2,
+               backfill_fetch_fn=fetch_fn)
+    return app2, sink2, k
+
+
+def test_restart_recovery_lands_flight_from_history(store):
+    # THE restart bug: stopped with sondes aloft, restarted after they landed.
+    # The rehydrated flight is silent past every timeout - it must be held for
+    # its history fetch and come out truly LANDED (truth + alert), not sit
+    # "mid-air" for hours and then expire without a landing.
+    f = simulate_flight(serial="RST1", burst_alt=20000)
+    frames = [parse_frame(m) for m in f.frames]
+    app, sink, k = _restart_midflight(store, f, lambda s, timeout=None: f.frames)
+    fl = app.tracker.get("RST1")
+    assert fl is not None and fl.state.value == "ASCENT"   # rehydrated
+
+    # well past the ascent-lost timeout: without the hold this tick would
+    # expire the flight before its fetch could resolve it
+    now = fl.last_seen + timedelta(
+        seconds=app.cfg.tracker.ascent_lost_timeout_seconds + 600)
+    assert now > frames[-1].dt                 # the sonde is really down by now
+    app.tick(now=now)
+    assert app.tracker.get("RST1").state.value == "ASCENT"   # held, not expired
+    assert app._backfill.run_pending() == 1
+
+    assert app.apply_backfills() == 1
+    assert app.tracker.get("RST1").state.value == "LANDED"
+    lnd = store.get_landing("RST1", frames[0].dt.date())
+    assert lnd is not None and lnd["detected_by"] == "telemetry"
+    assert haversine_km(lnd["land_lat"], lnd["land_lon"],
+                        f.land_lat, f.land_lon) < 1.0
+    assert any("LANDED" in m.title for m in sink.sent)
+    # resolved: the next tick neither re-fetches nor finds anything to expire
+    app.tick(now=now + timedelta(seconds=60))
+    assert app._backfill.run_pending() == 0
+
+
+def test_recovery_with_no_new_history_falls_back_to_expiry(store):
+    # SondeHub knows nothing we don't (it lost the sonde too): the rebuild is
+    # a no-op, and once the fetch resolves the ascent-lost timeout closes the
+    # flight out - EXPIRED, so no landing truth and no alert.
+    f = simulate_flight(serial="RST2", burst_alt=20000)
+    frames = [parse_frame(m) for m in f.frames]
+    app, sink, k = _restart_midflight(
+        store, f, lambda s, timeout=None: f.frames[:k])   # nothing new
+    fl = app.tracker.get("RST2")
+    now = fl.last_seen + timedelta(
+        seconds=app.cfg.tracker.ascent_lost_timeout_seconds + 600)
+    app.tick(now=now)
+    app._backfill.run_pending()
+    assert app.apply_backfills() == 0          # history adds nothing → no rebuild
+    assert app.tracker.get("RST2").state.value == "ASCENT"
+
+    app.tick(now=now)                          # fetch resolved → hold released
+    assert app.tracker.get("RST2").state.value == "LANDED"
+    assert store.get_landing("RST2", frames[0].dt.date()) is None
+    assert sink.sent == []
+    assert app._backfill.run_pending() == 0    # recovery is one attempt per flight
+
+
+def test_recovery_not_requested_when_backfill_disabled(store):
+    f = simulate_flight(serial="RST3", burst_alt=20000)
+    calls = []
+    app, _, _ = _restart_midflight(store, f,
+                                   lambda s, timeout=None: calls.append(s))
+    app.cfg.ingest.backfill_enabled = False
+    fl = app.tracker.get("RST3")
+    now = fl.last_seen + timedelta(
+        seconds=app.cfg.tracker.ascent_lost_timeout_seconds + 600)
+    app.tick(now=now)                          # no fetch, and no hold either:
+    assert app._backfill.run_pending() == 0 and calls == []
+    assert app.tracker.get("RST3").state.value == "LANDED"   # plain expiry
+
+
+def test_recovery_hold_expires_when_fetch_never_returns(store):
+    # A wedged fetch worker must not keep ghost flights mid-air forever: past
+    # the hold cap the flight goes back to the timeout sweep.
+    from tallyho import app as app_mod
+
+    f = simulate_flight(serial="RST4", burst_alt=20000)
+    app, sink, _ = _restart_midflight(store, f, lambda s, timeout=None: f.frames)
+    fl = app.tracker.get("RST4")
+    now = fl.last_seen + timedelta(
+        seconds=app.cfg.tracker.ascent_lost_timeout_seconds + 600)
+    app.tick(now=now)                          # fetch queued, never drained
+    assert app.tracker.get("RST4").state.value == "ASCENT"
+    later = now + timedelta(seconds=app_mod._RECOVERY_HOLD_MAX_SECONDS + 60)
+    app.tick(now=later)
+    assert app.tracker.get("RST4").state.value == "LANDED"
+    assert store.get_landing("RST4", parse_frame(f.frames[0]).dt.date()) is None
+    assert sink.sent == []
 
 
 def test_backfill_moves_flight_to_its_true_launch_day(store):

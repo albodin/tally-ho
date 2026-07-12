@@ -50,6 +50,12 @@ class IngestConfig:
     # history API - see tallyho.backfill.
     backfill_enabled: bool = True
     backfill_timeout_seconds: float = 60.0  # per history fetch
+    # A tracked flight silent this long gets one history fetch too: frames the
+    # daemon missed (it was down while the sondes flew on, or the stream
+    # dropped) are still in SondeHub, and replaying them closes the flight out
+    # with its real fate - a landing during the downtime becomes a real LANDED
+    # with ground truth - instead of a timeout expiry hours later.
+    backfill_silent_seconds: float = 300.0
 
 
 @dataclass(slots=True)

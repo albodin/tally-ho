@@ -230,10 +230,13 @@ class FlightTracker:
         key = self._active_key.get(serial)
         return self.flights.get(key) if key else None
 
-    def check_timeouts(self, now: datetime) -> list[tuple[Flight, TrackerEvent]]:
+    def check_timeouts(self, now: datetime,
+                       hold: "set[str] | None" = None) -> list[tuple[Flight, TrackerEvent]]:
         """Mark flights LANDED when telemetry stops while low, expire flights
         whose telemetry stopped long ago at any altitude, and evict long-silent
-        LANDED flights from memory."""
+        LANDED flights from memory. Serials in ``hold`` are left alone this
+        sweep - the caller is resolving their real fate out of band (a history
+        fetch is in flight) and a timeout close-out now would preempt it."""
         out = []
         tcfg = self.cfg.tracker
         for key, flight in list(self.flights.items()):
@@ -248,6 +251,8 @@ class FlightTracker:
                     if self._active_key.get(flight.serial) == key:
                         del self._active_key[flight.serial]
                 continue
+            if hold and flight.serial in hold:
+                continue
             if flight.last_alt is None:
                 continue
             if gap > tcfg.stale_flight_seconds:
@@ -256,6 +261,18 @@ class FlightTracker:
                 # NOT record its last mid-air position as a landing.
                 log.info("expiring stale flight %s (silent %.0f s at %.0f m)",
                          flight.serial, gap, flight.last_alt)
+                flight.state = FlightState.LANDED
+                self._persist(flight, profile=True)
+                out.append((flight, TrackerEvent.EXPIRED))
+                continue
+            if (flight.state == FlightState.ASCENT
+                    and gap > tcfg.ascent_lost_timeout_seconds):
+                # Silence only ever grows the radio horizon on the way up, so a
+                # long-lost ascending sonde burst and landed unheard (daemon
+                # downtime, dead sonde). Close it out - EXPIRED, not a landing:
+                # the last fix is mid-ascent, nowhere near where it came down.
+                log.info("expiring lost ascent flight %s (silent %.0f s at "
+                         "%.0f m)", flight.serial, gap, flight.last_alt)
                 flight.state = FlightState.LANDED
                 self._persist(flight, profile=True)
                 out.append((flight, TrackerEvent.EXPIRED))

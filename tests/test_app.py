@@ -67,6 +67,9 @@ def test_expired_flight_records_no_landing_truth(store):
     # no LANDED alert is pushed.
     f = simulate_flight(serial="LOST1", burst_alt=28000)
     app, sink = _app_with_sub(store, f.land_lat, f.land_lon, radius=40.0)
+    # bare timeout sweep: with backfill on, a silent flight is first held for
+    # a history-recovery attempt (that flow is covered in test_backfill.py)
+    app.cfg.ingest.backfill_enabled = False
     frames = [parse_frame(m) for m in f.frames]
     # feed only the early ascent, then let it go stale
     app.on_frames(frames[:100])
@@ -315,6 +318,9 @@ def test_landing_recorded_on_timeout(store):
     # sweep declare LANDED and record the last-known position as truth.
     f = simulate_flight(serial="TOUT1", burst_alt=20000)
     app, _ = _app_with_sub(store, f.land_lat, f.land_lon, radius=40.0)
+    # bare timeout sweep: with backfill on, a silent flight is first held for
+    # a history-recovery attempt (that flow is covered in test_backfill.py)
+    app.cfg.ingest.backfill_enabled = False
     frames = [parse_frame(m) for m in f.frames]
     # Drop the final near-ground frames so the tracker never sees touchdown
     # directly, but leave it low enough (<2 km) to be inside the timeout band.

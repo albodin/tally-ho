@@ -33,6 +33,11 @@
 # reconnect_jitter = 0.3
 # backfill_enabled = true           # sonde first heard mid-air: fetch the frames we missed from SondeHub
 # backfill_timeout_seconds = 60.0   # per history fetch
+# A tracked flight silent this long gets a history fetch too: frames missed
+# while the app was down (or the stream dropped) close the flight out with its
+# real fate - a landing during a restart becomes a real landing alert - instead
+# of a timeout expiry hours later.
+# backfill_silent_seconds = 300.0
 
 [tracker]
 # burst_drop_m = 300.0              # alt below running max to call burst
@@ -48,6 +53,11 @@
 # the ground within minutes; after this gap it is closed out (no landing-truth
 # record - the last fix was nowhere near the ground).
 # descent_lost_timeout_seconds = 600.0
+# An ASCENT flight silent this long burst and landed unheard (the app was down
+# with sondes aloft, or the sonde died): closed out (no landing record) instead
+# of sitting "mid-air" until stale_flight_seconds. FLOAT flights are exempt -
+# floaters legitimately stay up for hours.
+# ascent_lost_timeout_seconds = 5400.0
 # stale_flight_seconds = 21600.0    # silent this long = over, whatever the altitude
 # launch_max_agl_m = 1500.0         # claim a launch site only if first heard this low
 # new_ascent_climb_m = 500.0        # climb above the landing alt to declare a relaunch

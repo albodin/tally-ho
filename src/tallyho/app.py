@@ -30,6 +30,11 @@ from windfall.tracker import FlightTracker, TrackerEvent
 
 log = logging.getLogger(__name__)
 
+# A pending silence-recovery fetch holds its flight out of the timeout sweep;
+# past this age the hold is abandoned (a wedged fetch worker must not keep
+# ghost flights mid-air forever - that is the very bug recovery exists to fix).
+_RECOVERY_HOLD_MAX_SECONDS = 1800.0
+
 
 class App:
     def __init__(
@@ -72,13 +77,19 @@ class App:
         # sonde-time of the last saved prediction per descending flight - the
         # per-frame throttle (see PredictConfig.descent_predict_seconds)
         self._last_pred_t: dict[tuple, float] = {}
-        # First-detection history backfill: a sonde first heard mid-air gets its
+        # History backfill: a sonde first heard mid-air - or a tracked flight
+        # that goes silent (restart with sondes aloft, stream drop) - gets its
         # missed frames fetched from SondeHub (worker thread) and its flight
-        # rebuilt on this thread - see apply_backfills(). One attempt per flight;
-        # live frames heard while a fetch runs are buffered for the rebuild.
+        # rebuilt on this thread - see apply_backfills(). One attempt per flight
+        # per trigger; live frames heard while a fetch runs are buffered for the
+        # rebuild. While a silence-recovery fetch is pending its flight is held
+        # out of the timeout sweep (tick), so the rebuild - not a blind expiry -
+        # decides its fate.
         self._backfill = HistoryFetcher(cfg.ingest, fetch_fn=backfill_fetch_fn)
         self._backfill_requested: set[tuple] = set()
         self._backfill_buffer: dict[str, list[Frame]] = {}
+        self._recovery_requested: set[tuple] = set()
+        self._recovery_pending: dict[str, datetime] = {}   # serial → requested at
         self._gfs_stop = threading.Event()
         # ROI-change wake-ups: a new/moved location kicks the ROI-dependent
         # downloaders immediately instead of waiting out their cadences (GFS
@@ -209,6 +220,7 @@ class App:
         processing). Returns the number of flights rebuilt."""
         rebuilt = 0
         for serial, raw in self._backfill.drain():
+            self._recovery_pending.pop(serial, None)
             live = self._backfill_buffer.pop(serial, [])
             if not raw:
                 continue
@@ -222,21 +234,26 @@ class App:
 
     def _rebuild_from_history(self, serial: str, raw: list[dict],
                               live: list[Frame]) -> bool:
-        """Replace a provisional mid-air flight with one rebuilt from its full
-        SondeHub history: forget the in-memory flight, erase its rows, and
-        replay history + buffered live frames through the tracker (launch site,
-        ascent wind profile, burst and descent state all come out real). One
+        """Replace a tracked flight with one rebuilt from its full SondeHub
+        history: forget the in-memory flight, erase its rows, and replay
+        history + buffered live frames through the tracker (launch site, ascent
+        wind profile, burst/descent/landed state all come out real). Serves
+        both backfill triggers - history reaching *earlier* than we first heard
+        (first-detection) or *later* than we last heard (silence recovery). One
         prediction/alert pass runs at the end - replay itself stays silent."""
         flight = self.tracker.get(serial)
         if flight is None or flight.state == FlightState.LANDED:
             return False   # dropped (ROI) or resolved while the fetch ran
         frames = merge_history(raw, live, serial)
-        if not frames or (flight.first_seen is not None
-                          and frames[0].dt >= flight.first_seen):
-            return False   # history adds nothing older than what we heard live
-        log.info("rebuilding %s from %d frame(s) of history (heard live from "
-                 "%s, history from %s)", serial, len(frames),
-                 flight.first_seen, frames[0].dt)
+        if not frames:
+            return False
+        starts_earlier = flight.first_seen is None or frames[0].dt < flight.first_seen
+        ends_later = flight.last_seen is None or frames[-1].dt > flight.last_seen
+        if not (starts_earlier or ends_later):
+            return False   # history adds nothing beyond what we heard live
+        log.info("rebuilding %s from %d frame(s) of history %s → %s (heard "
+                 "live %s → %s)", serial, len(frames), frames[0].dt,
+                 frames[-1].dt, flight.first_seen, flight.last_seen)
         self.tracker.forget(serial)
         self._last_pred_t.pop((serial, flight.launch_day), None)
 
@@ -267,6 +284,49 @@ class App:
                                               now=fl.last_seen)
         return True
 
+    def _request_recoveries(self, now: datetime) -> int:
+        """Queue one history fetch for each tracked flight that has gone
+        silent. Frames the daemon missed - it was down while the sondes flew
+        on (the restart-with-sondes-aloft case), or the stream dropped - are
+        still in SondeHub; replaying them closes the flight out with its real
+        fate (a landing during the downtime becomes a real LANDED with ground
+        truth) instead of a blind timeout expiry. One attempt per flight."""
+        if not self.cfg.ingest.backfill_enabled:
+            return 0
+        n = 0
+        for flight in list(self.tracker.flights.values()):
+            if flight.state == FlightState.LANDED or flight.last_seen is None:
+                continue
+            gap = (now - flight.last_seen).total_seconds()
+            if gap < self.cfg.ingest.backfill_silent_seconds:
+                continue
+            key = (flight.serial, flight.launch_day)
+            # skip if already attempted, or a fetch for this serial is running
+            if key in self._recovery_requested or flight.serial in self._backfill_buffer:
+                continue
+            if len(self._recovery_requested) > 4096:
+                self._recovery_requested.clear()
+            self._recovery_requested.add(key)
+            if not self._backfill.request(flight.serial):
+                continue
+            log.info("%s silent %.0f s at %.0f m; fetching missed frames from "
+                     "SondeHub", flight.serial, gap, flight.last_alt or 0.0)
+            self._backfill_buffer[flight.serial] = []
+            self._recovery_pending[flight.serial] = now
+            n += 1
+        return n
+
+    def _recovery_hold(self, now: datetime) -> set[str]:
+        """Serials whose recovery fetch is still pending: the timeout sweep
+        must not close their flights out from under the coming rebuild.
+        Overaged entries are dropped, not held (see _RECOVERY_HOLD_MAX_SECONDS)."""
+        for serial in [s for s, t in self._recovery_pending.items()
+                       if (now - t).total_seconds() > _RECOVERY_HOLD_MAX_SECONDS]:
+            log.warning("recovery fetch for %s never completed; releasing its "
+                        "flight to the timeout sweep", serial)
+            del self._recovery_pending[serial]
+        return set(self._recovery_pending)
+
     def predict_active(self, now: datetime | None = None) -> int:
         """Refresh pre-burst landing predictions + paths for every sonde still
         going up. DESCENT flights are predicted per-frame in
@@ -287,12 +347,16 @@ class App:
         return saved
 
     def tick(self, now: datetime | None = None) -> None:
-        """Periodic maintenance: out-of-ROI drop + landed-by-timeout sweep. The ROI sweep runs first so a flight that left the
-        box (or was left behind by a subscriber edit) is dropped silently
-        instead of alerting on a later timeout."""
+        """Periodic maintenance: out-of-ROI drop, silence-recovery fetches,
+        landed-by-timeout sweep. The ROI sweep runs first so a flight that left
+        the box (or was left behind by a subscriber edit) is dropped silently
+        instead of alerting on a later timeout; recoveries queue before the
+        timeout sweep so a flight already past its timeout at queue time (the
+        first tick after a restart) is held for its rebuild, not expired."""
         now = now or datetime.now(timezone.utc)
         self._drop_outside_roi()
-        for flight, event in self.tracker.check_timeouts(now):
+        self._request_recoveries(now)
+        for flight, event in self.tracker.check_timeouts(now, hold=self._recovery_hold(now)):
             if event == TrackerEvent.LANDED:
                 self._record_landing(flight, now=flight.last_seen or now,
                                      detected_by="timeout")

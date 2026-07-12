@@ -44,6 +44,14 @@ class TrackerConfig:
     # minutes; after this gap it is closed out - without a landing-truth record,
     # since the last fix was nowhere near the ground.
     descent_lost_timeout_seconds: float = 600.0
+    # An ASCENT flight silent this long is down: the radio horizon only grows on
+    # the way up, so losing an ascending sonde for good means the tracker missed
+    # the rest of the flight (it was stopped with sondes aloft, or the sonde
+    # died). 90 min covers a worst-case remaining climb + descent; without this,
+    # such flights sat "mid-air" until stale_flight_seconds. Closed out as
+    # EXPIRED - the mid-ascent last fix is nowhere near the landing. FLOAT is
+    # exempt (floaters legitimately stay up for hours) and keeps the stale sweep.
+    ascent_lost_timeout_seconds: float = 5400.0
     # A flight silent this long is over no matter its altitude (drifted out of
     # receiver range mid-air). It is closed out WITHOUT a landing record and
     # evicted from memory, so it stops showing as active forever.

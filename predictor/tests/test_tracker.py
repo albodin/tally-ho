@@ -315,6 +315,64 @@ def test_stale_airborne_flight_expires_without_landing():
     assert tracker.flights == {}
 
 
+def test_lost_ascent_flight_expires_before_stale_sweep():
+    # An ascending sonde that goes silent for good burst and landed unheard
+    # (daemon stopped with sondes aloft, dead sonde): it must close out after
+    # ascent_lost_timeout_seconds, not sit "mid-air" for stale_flight_seconds.
+    cfg = Config()
+    tracker = FlightTracker(cfg)
+    for s in range(0, 1200, 10):
+        flight, _ = tracker.update(_mk(45.0, 7.0, 200.0 + 5 * s, s, s))
+    assert flight.state == FlightState.ASCENT
+    # still within the ascent-lost window: nothing happens
+    t1 = flight.last_seen + timedelta(seconds=cfg.tracker.ascent_lost_timeout_seconds - 60)
+    assert tracker.check_timeouts(t1) == []
+    assert flight.state == FlightState.ASCENT
+    # past it (but well before the stale sweep): EXPIRED, no landing truth
+    t2 = flight.last_seen + timedelta(seconds=cfg.tracker.ascent_lost_timeout_seconds + 60)
+    assert t2 < flight.last_seen + timedelta(seconds=cfg.tracker.stale_flight_seconds)
+    assert tracker.check_timeouts(t2) == [(flight, TrackerEvent.EXPIRED)]
+    assert flight.state == FlightState.LANDED
+
+
+def test_float_flight_is_exempt_from_ascent_lost_timeout():
+    # Floaters legitimately stay aloft for hours; a silent FLOAT flight keeps
+    # the long stale sweep, not the ascent-lost timeout.
+    cfg = Config()
+    tracker = FlightTracker(cfg)
+    frames, t, alt, fn = [], 0.0, 200.0, 0
+    while alt < 18000:
+        frames.append(_mk(45.0, 7.0, alt, t, fn))
+        alt += 5.0
+        t += 1.0
+        fn += 1
+    for _ in range(600):
+        frames.append(_mk(45.0, 7.0, alt + math.sin(t) * 0.3, t, fn))
+        t += 1.0
+        fn += 1
+    flight, _, _ = run_flight(tracker, frames)
+    assert flight.state == FlightState.FLOAT
+    t1 = flight.last_seen + timedelta(seconds=cfg.tracker.ascent_lost_timeout_seconds + 60)
+    assert tracker.check_timeouts(t1) == []
+    assert flight.state == FlightState.FLOAT
+    t2 = flight.last_seen + timedelta(seconds=cfg.tracker.stale_flight_seconds + 60)
+    assert tracker.check_timeouts(t2) == [(flight, TrackerEvent.EXPIRED)]
+
+
+def test_hold_defers_timeout_closeout():
+    # A serial in `hold` (its history fetch is in flight) must survive the
+    # sweep untouched; once released it closes out as usual.
+    cfg = Config()
+    tracker = FlightTracker(cfg)
+    for s in range(0, 1200, 10):
+        flight, _ = tracker.update(_mk(45.0, 7.0, 200.0 + 5 * s, s, s))
+    assert flight.state == FlightState.ASCENT
+    later = flight.last_seen + timedelta(seconds=cfg.tracker.stale_flight_seconds + 60)
+    assert tracker.check_timeouts(later, hold={flight.serial}) == []
+    assert flight.state == FlightState.ASCENT
+    assert tracker.check_timeouts(later) == [(flight, TrackerEvent.EXPIRED)]
+
+
 def test_drop_evicts_flight_without_landing_truth():
     # drop() = the caller decided this flight is no longer interesting (e.g.
     # it left the region of interest): closed out immediately, evicted from
