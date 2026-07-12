@@ -4,6 +4,8 @@ The rasterio-backed lookups need real GLO-30 tiles and are not exercised here;
 we test tile naming, the offline fallbacks, the factory degrade path, and that a
 synthetic terrain actually moves the predicted landing (the terrain win)."""
 
+import json
+
 import pytest
 
 from windfall.config import Config, DEMConfig
@@ -190,6 +192,103 @@ def test_download_dem_tiles_fetches_missing_and_remembers_404(tmp_path):
     assert calls == []
 
 
+def test_download_dem_tiles_absent_list_survives_restart(tmp_path):
+    calls: list[str] = []
+
+    def fetch(url, dest):
+        calls.append(url)
+        if _OCEAN in url:
+            return False
+        dest.write_bytes(b"tile")
+        return True
+
+    cfg = DEMConfig(path=str(tmp_path / "dem"))
+    download_dem_tiles(cfg, _BOX_2X2, skip=set(), fetch=fetch)
+    absent_file = tmp_path / "dem" / "absent_tiles.json"
+    assert json.loads(absent_file.read_text()) == [_OCEAN]
+    # atomic write: no .part leftovers (also guards the tile downloads)
+    assert not list((tmp_path / "dem").glob("*.part"))
+
+    # "restart": a fresh skip set - the persisted 404 is merged in, not re-fetched
+    calls.clear()
+    skip: set[str] = set()
+    assert download_dem_tiles(cfg, _BOX_2X2, skip=skip, fetch=fetch) == []
+    assert calls == []
+    assert _OCEAN in skip
+
+
+def test_download_dem_tiles_absent_saved_even_when_pass_aborts(tmp_path):
+    # 404s persist as discovered: a pass that dies partway (here the
+    # unwritable-dir abort) keeps the ocean squares found before the failure
+    def fetch(url, dest):
+        if _OCEAN in url:
+            return False
+        raise PermissionError(13, "Permission denied", str(dest))
+
+    # single worker: the ocean 404 (first in tile order) lands before the abort
+    cfg = DEMConfig(path=str(tmp_path / "dem"), download_workers=1)
+    assert download_dem_tiles(cfg, _BOX_2X2, fetch=fetch) == []
+    assert json.loads((tmp_path / "dem" / "absent_tiles.json").read_text()) == [_OCEAN]
+
+
+def test_download_dem_tiles_logs_roi_progress(tmp_path, caplog):
+    def fetch(url, dest):
+        if _OCEAN in url:
+            return False
+        dest.write_bytes(b"tile")
+        return True
+
+    # single worker: deterministic tile order, so the ratios are exact
+    cfg = DEMConfig(path=str(tmp_path / "dem"), download_workers=1)
+    import logging
+
+    with caplog.at_level(logging.INFO, logger="windfall.dem"):
+        download_dem_tiles(cfg, _BOX_2X2, fetch=fetch)
+    got = [r.getMessage() for r in caplog.records
+           if r.getMessage().startswith("downloaded DEM tile ")]
+    # the ocean square is hit first (lat/lon-ascending order) and drops out of
+    # the denominator, so the three land tiles count up to a complete 3/3
+    assert [m[m.index("("):] for m in got] == [
+        "(1/3 for ROI)", "(2/3 for ROI)", "(3/3 for ROI)"]
+
+
+def test_download_dem_tiles_corrupt_absent_list_is_rebuilt(tmp_path):
+    dem = tmp_path / "dem"
+    dem.mkdir()
+    (dem / "absent_tiles.json").write_text("{not json")
+
+    def fetch(url, dest):
+        if _OCEAN in url:
+            return False
+        dest.write_bytes(b"tile")
+        return True
+
+    cfg = DEMConfig(path=str(dem))
+    # corrupt file reads as empty (one extra 404 round) and is rewritten intact
+    assert len(download_dem_tiles(cfg, _BOX_2X2, fetch=fetch)) == 3
+    assert json.loads((dem / "absent_tiles.json").read_text()) == [_OCEAN]
+
+
+def test_download_dem_tiles_parallel_workers_fetch_concurrently(tmp_path):
+    import threading
+
+    # releases only when two fetches are in flight at once: a sequential
+    # implementation trips the timeout, breaks the barrier, and downloads nothing
+    barrier = threading.Barrier(2, timeout=10)
+
+    def fetch(url, dest):
+        barrier.wait()
+        if _OCEAN in url:
+            return False
+        dest.write_bytes(b"tile")
+        return True
+
+    cfg = DEMConfig(path=str(tmp_path / "dem"), download_workers=4)
+    new = download_dem_tiles(cfg, _BOX_2X2, fetch=fetch)
+    assert len(new) == 3
+    assert json.loads((tmp_path / "dem" / "absent_tiles.json").read_text()) == [_OCEAN]
+
+
 def test_download_dem_tiles_no_roi_is_a_noop(tmp_path):
     cfg = DEMConfig(path=str(tmp_path / "dem"))
     assert download_dem_tiles(cfg, None, fetch=lambda u, d: True) == []
@@ -206,7 +305,7 @@ def test_download_dem_tiles_unwritable_dir_aborts_pass_quietly(tmp_path, caplog)
         calls.append(url)
         raise PermissionError(13, "Permission denied", str(dest))
 
-    cfg = DEMConfig(path=str(tmp_path))
+    cfg = DEMConfig(path=str(tmp_path), download_workers=1)
     import logging
 
     with caplog.at_level(logging.ERROR, logger="windfall.dem"):

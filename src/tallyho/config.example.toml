@@ -165,6 +165,7 @@
 # Set false to manage tiles yourself (read-only mount, own tile set).
 # download_in_process = true
 # download_check_seconds = 300.0
+# download_workers = 4             # parallel tile fetches per pass (1..16)
 # download_url = "https://copernicus-dem-30m.s3.amazonaws.com/{name}/{name}.tif"
 
 [gfs]

@@ -33,6 +33,8 @@ function parseValue(spec, input) {
     const n = Number(raw);
     if (raw === "" || !Number.isFinite(n)) throw new Error("expected a number");
     if (spec.kind === "int" && !Number.isInteger(n)) throw new Error("expected an integer");
+    if (spec.min != null && n < spec.min) throw new Error(`must be at least ${spec.min}`);
+    if (spec.max != null && n > spec.max) throw new Error(`must be at most ${spec.max}`);
     return n;
   }
   if (spec.kind === "int_list") {
@@ -73,6 +75,10 @@ function makeInput(spec) {
     if (spec.kind === "int") { input.type = "number"; input.step = "1"; }
     else if (spec.kind === "float") { input.type = "number"; input.step = "any"; }
     else input.type = "text";
+    if (input.type === "number") {
+      if (spec.min != null) input.min = String(spec.min);
+      if (spec.max != null) input.max = String(spec.max);
+    }
     input.value = renderValue(spec, spec.value);
     input.placeholder = renderValue(spec, spec.default);
   }

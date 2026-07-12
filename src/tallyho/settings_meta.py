@@ -65,6 +65,13 @@ _CHOICES: dict[tuple[str | None, str], tuple[str, ...]] = {
     ("profile", "correction_mode"): ("blend", "bias"),
     ("dem", "source"): ("auto", "glo30", "tiles"),
 }
+# (min, max) bounds, None = unbounded on that side. Each entry mirrors a hard
+# clamp at the consuming site - validate here so the UI never accepts a value
+# the runtime would silently override.
+_RANGES: dict[tuple[str | None, str], tuple[float | None, float | None]] = {
+    ("dem", "download_workers"): (1, 16),          # clamp in dem.download_dem_tiles
+    ("dem", "download_check_seconds"): (30, None),  # clamp in App._dem_loop
+}
 
 
 @dataclass(frozen=True)
@@ -77,6 +84,8 @@ class FieldSpec:
     choices: tuple[str, ...] | None
     restart_required: bool
     env_var: str             # e.g. "TALLYHO_GFS_ENABLED"
+    minimum: float | None = None   # numeric kinds only; None = unbounded
+    maximum: float | None = None
 
     @property
     def dotted(self) -> str:
@@ -198,6 +207,8 @@ def field_specs() -> tuple[FieldSpec, ...]:
         choices=_CHOICES.get((section, key)),
         restart_required=(section, key) in RESTART_REQUIRED,
         env_var=ENV_PREFIX + (f"{section}_{key}" if section else key).upper(),
+        minimum=_RANGES.get((section, key), (None, None))[0],
+        maximum=_RANGES.get((section, key), (None, None))[1],
     ) for section, key, default in flat)
 
 
@@ -229,15 +240,28 @@ def describe(cfg: Config) -> dict:
                 "restart_required": s.restart_required,
                 "env_var": s.env_var,
                 "env_overridden": s.env_var in os.environ,
+                "min": s.minimum,
+                "max": s.maximum,
             } for s in specs],
         })
     return {"sections": sections}
 
 
+def _in_range(spec: FieldSpec, value: float) -> float:
+    lo, hi = spec.minimum, spec.maximum
+    if (lo is not None and value < lo) or (hi is not None and value > hi):
+        if lo is not None and hi is not None:
+            raise ValueError(f"must be between {lo} and {hi}")
+        raise ValueError(f"must be at least {lo}" if lo is not None
+                         else f"must be at most {hi}")
+    return value
+
+
 def coerce(spec: FieldSpec, value: object) -> object:
     """Validate a JSON-decoded value against ``spec``; raises ValueError with a
     human message. Integral floats pass as ints (every JS number is a float),
-    but bool is never a number and "true" is never a bool."""
+    but bool is never a number and "true" is never a bool. Numeric kinds also
+    honor the ``_RANGES`` bounds."""
     kind = spec.kind
     if kind == "bool":
         if isinstance(value, bool):
@@ -253,7 +277,7 @@ def coerce(spec: FieldSpec, value: object) -> object:
         raise ValueError("expected one of: " + ", ".join(spec.choices or ()))
     if kind == "float":
         if isinstance(value, (int, float)) and not isinstance(value, bool):
-            return float(value)
+            return _in_range(spec, float(value))
         raise ValueError("expected a number")
     if kind in ("int", "opt_int"):
         if kind == "opt_int" and value is None:
@@ -262,7 +286,7 @@ def coerce(spec: FieldSpec, value: object) -> object:
             raise ValueError("expected an integer")
         if isinstance(value, float) and not value.is_integer():
             raise ValueError("expected an integer")
-        return int(value)
+        return int(_in_range(spec, int(value)))
     if kind == "int_list":
         if not isinstance(value, list):
             raise ValueError("expected a list of integers")

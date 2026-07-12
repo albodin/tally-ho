@@ -356,6 +356,34 @@ def _fetch_url(url: str, dest: Path) -> bool:
         raise
 
 
+ABSENT_FILE = "absent_tiles.json"
+
+
+def _load_absent(path: Path) -> set[str]:
+    """Tile names recorded absent upstream; empty on any read/parse problem
+    (worst case is one extra 404 round, re-recorded on the same pass)."""
+    import json
+
+    try:
+        return {str(n) for n in json.loads(path.read_text())}
+    except (OSError, ValueError, TypeError):
+        return set()
+
+
+def _save_absent(path: Path, absent: set[str]) -> bool:
+    import json
+
+    try:
+        part = path.with_name(path.name + ".part")
+        part.write_text(json.dumps(sorted(absent), indent=0) + "\n")
+        part.replace(path)
+        return True
+    except OSError:
+        log.warning("could not persist absent-tile list to %s; ocean squares "
+                    "will be re-probed after a restart", path)
+        return False
+
+
 def download_dem_tiles(
     cfg: DEMConfig,
     box: BBox | None,
@@ -369,12 +397,18 @@ def download_dem_tiles(
     layout) are skipped, so once the ROI is covered every pass is a free
     existence check.
 
-    ``skip`` is the caller's persistent memory of tiles absent upstream: a 404
+    ``skip`` is the caller's in-memory set of tiles absent upstream: a 404
     means an ocean-only square with no tile (sea-level fallback is correct
-    there), and is recorded so it isn't re-requested every pass. Transient
-    errors are logged and *not* recorded - the next pass retries. ``fetch`` is
-    injectable for tests; the default streams via urllib to a ``.part`` file
-    renamed into place, so a killed download never leaves a truncated .tif."""
+    there). New 404s are recorded in ``absent_tiles.json`` in the DEM dir as
+    they are discovered (a restart even mid-pass keeps them) and merged back
+    into ``skip`` each pass, so neither later passes nor restarts re-request
+    them (delete the file to force a recheck, e.g. should
+    Copernicus ever add coverage). Transient errors are logged and *not*
+    recorded - the next pass retries. Fetches run on ``cfg.download_workers``
+    threads (clamped 1..16). ``fetch`` is injectable for tests (it must be
+    thread-safe if workers > 1); the default streams via urllib to a ``.part``
+    file renamed into place, so a killed download never leaves a truncated
+    .tif."""
     if box is None:
         log.debug("no capture ROI (no active subscribers); skipping DEM download")
         return []
@@ -391,34 +425,68 @@ def download_dem_tiles(
                   "as its uid:gid - chown the host dir to match, or set "
                   "PUID/PGID); skipping DEM download pass", dest)
         return new
-    for name in tiles_for_bbox(box):
-        if name in skip:
-            continue
-        out = dest / f"{name}.tif"
-        if out.exists() or (dest / name / f"{name}.tif").exists():
-            continue
+    absent_file = dest / ABSENT_FILE
+    skip |= _load_absent(absent_file)
+    absent_save_ok = True   # one warning per pass, not per ocean square
+
+    def on_disk(name: str) -> bool:
+        return (dest / f"{name}.tif").exists() or (dest / name / f"{name}.tif").exists()
+
+    names = [n for n in tiles_for_bbox(box) if n not in skip]
+    todo = [n for n in names if not on_disk(n)]
+    # progress denominator: ROI tiles believed to exist upstream; 404s
+    # discovered this pass drop out of it as they are found
+    total = len(names)
+    have = total - len(todo)
+    lock = threading.Lock()
+    abort = threading.Event()   # unwritable dir: fails every tile identically
+
+    def fetch_one(name: str) -> None:
+        nonlocal total, have, absent_save_ok
+        if abort.is_set():
+            return
         part = dest / f"{name}.tif.part"
         try:
             ok = fetch(cfg.download_url.format(name=name), part)
         except PermissionError:
-            # the dir itself is unwritable: every remaining tile fails the same
-            # way, so one actionable line and out - no per-tile tracebacks
-            log.error("DEM dir %s is not writable by this process (container "
-                      "runs as its uid:gid - chown the host dir to match, or "
-                      "set PUID/PGID); skipping DEM download pass", dest)
-            return new
+            # one actionable line and no further fetches - not a traceback
+            # (or a queue drain) per remaining tile
+            with lock:
+                if not abort.is_set():
+                    abort.set()
+                    log.error("DEM dir %s is not writable by this process "
+                              "(container runs as its uid:gid - chown the host "
+                              "dir to match, or set PUID/PGID); skipping DEM "
+                              "download pass", dest)
+            return
         except Exception:
             log.exception("DEM tile %s download failed; will retry next pass", name)
             part.unlink(missing_ok=True)
-            continue
+            return
         if not ok:
             part.unlink(missing_ok=True)
-            skip.add(name)
-            log.info("no GLO-30 tile %s (ocean-only square); sea-level fallback there", name)
-            continue
-        part.replace(out)
-        new.append(name)
-        log.info("downloaded DEM tile %s", name)
+            with lock:
+                skip.add(name)
+                total -= 1
+                log.info("no GLO-30 tile %s (ocean-only square); sea-level fallback there", name)
+                # persist immediately - the first pass over a big ROI can run
+                # for an hour, and a restart mid-pass must not re-probe these
+                if absent_save_ok:
+                    absent_save_ok = _save_absent(absent_file, skip)
+            return
+        part.replace(dest / f"{name}.tif")
+        with lock:
+            new.append(name)
+            have += 1
+            log.info("downloaded DEM tile %s (%d/%d for ROI)", name, have, total)
+
+    if todo:
+        from concurrent.futures import ThreadPoolExecutor
+
+        workers = max(1, min(16, cfg.download_workers))
+        with ThreadPoolExecutor(max_workers=workers,
+                                thread_name_prefix="dem-fetch") as pool:
+            list(pool.map(fetch_one, todo))
     if new:
         log.info("downloaded %d DEM tile(s) into %s", len(new), dest)
     return new

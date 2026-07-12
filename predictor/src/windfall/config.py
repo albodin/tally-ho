@@ -244,6 +244,8 @@ class DEMConfig:
     # read-only mount, scripts/prefetch_dem.sh, or a 3DEP set).
     download_in_process: bool = True
     download_check_seconds: float = 300.0  # re-check cadence (ROI can grow)
+    # Parallel tile fetches per pass (clamped 1..16).
+    download_workers: int = 4
     download_url: str = "https://copernicus-dem-30m.s3.amazonaws.com/{name}/{name}.tif"
 
 

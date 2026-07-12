@@ -405,6 +405,11 @@ def download_hrrr_cycle(
         try:
             h = Herbie(run_date, model="hrrr", product="prs", fxx=fh,
                        save_dir=str(dest))
+            if h.idx is None:
+                # Cycle files publish sequentially; later fxx lag f00 by
+                # minutes, and subset downloads need the .idx sidecar.
+                log.info("HRRR fxx=%dh not published yet; skipping until next poll", fh)
+                continue
             local = h.download(levels)
             log.info("downloaded HRRR fxx=%dh -> %s", fh, local)
             out.append(local)

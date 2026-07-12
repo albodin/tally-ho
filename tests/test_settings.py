@@ -103,6 +103,8 @@ def test_env_override_flags_exactly_the_set_vars(monkeypatch):
     ("profile.correction_mode", "bias", "bias"),
     ("gfs.download_fxx", [0, 6.0, 12], [0, 6, 12]),
     ("display_tz", "Europe/Rome", "Europe/Rome"),
+    ("dem.download_workers", 16, 16),              # at the range bound
+    ("dem.download_check_seconds", 30, 30.0),
 ])
 def test_coerce_accepts(dotted, value, expected):
     assert coerce(_spec(dotted), value) == expected
@@ -118,10 +120,25 @@ def test_coerce_accepts(dotted, value, expected):
     ("gfs.download_fxx", 3),
     ("ensemble.seed", 1.5),
     ("display_tz", 3),
+    ("dem.download_workers", 0),            # below the range
+    ("dem.download_workers", 64),           # above the range (runtime clamps at 16)
+    ("dem.download_check_seconds", 5),      # below the loop's 30 s floor
 ])
 def test_coerce_rejects(dotted, value):
     with pytest.raises(ValueError):
         coerce(_spec(dotted), value)
+
+
+def test_ranges_name_real_numeric_knobs_and_ship_in_schema():
+    """A renamed knob must not linger in _RANGES; the UI gets min/max."""
+    assert set(settings_meta._RANGES) <= set(_leaves())
+    for sk in settings_meta._RANGES:
+        assert _spec(f"{sk[0]}.{sk[1]}" if sk[0] else sk[1]).kind in ("int", "float")
+    fields = {f"{sec['name']}.{f['key']}" if sec["name"] else f["key"]: f
+              for sec in describe(Config())["sections"] for f in sec["fields"]}
+    assert fields["dem.download_workers"]["min"] == 1
+    assert fields["dem.download_workers"]["max"] == 16
+    assert fields["dem.download_check_seconds"]["max"] is None
 
 
 # ---- validate_update / apply_values ---------------------------------------------
