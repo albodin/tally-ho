@@ -13,6 +13,8 @@
 .setting-help { color: var(--muted); font-size: 12px; padding-top: 8px; }
 .settings-grid input[type="checkbox"] { justify-self: start; margin-top: 9px;
                                         width: 16px; height: 16px; accent-color: var(--accent); }
+.settings-grid input[type="color"] { justify-self: start; width: 72px; height: 34px;
+                                     padding: 3px 4px; cursor: pointer; }
 .settings-grid input.dirty, .settings-grid select.dirty { border-color: var(--accent); }
 .settings-grid input.bad, .settings-grid select.bad { border-color: var(--bad); }
 .field-error { grid-column: 2 / -1; color: var(--bad); font-size: 12px; margin: -4px 0 2px; }

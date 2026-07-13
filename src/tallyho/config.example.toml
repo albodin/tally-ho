@@ -220,3 +220,20 @@
 # host = "127.0.0.1"               # bare-metal default; the Docker image binds 0.0.0.0
 #                                  # (login required - set up on first run)
 # port = 8080
+
+[colors]                           # dashboard map colors ("#rrggbb" hex) + opacities
+# Applied when the dashboard page loads - save, then reload the map to see them.
+# The *_opacity knobs are 0-1 (0 = invisible, 1 = solid).
+# track = "#5ad1c8"                # flown-track line (where the sonde has actually been)
+# track_opacity = 0.85
+# path_measured = "#4ea1ff"       # predicted path drawn from measured winds
+# path_gfs = "#a98bff"            # predicted path drawn from model (GFS/HRRR) winds
+# path_extrapolation = "#8b9bb0"  # predicted path when winds had to be extrapolated
+# path_opacity = 0.8
+# prediction = "#ffb454"          # predicted-landing crosshair + uncertainty circle
+# prediction_fill_opacity = 0.08  # uncertainty-circle fill
+# landing = "#7bd88f"             # actual-landing dot
+# landing_fill_opacity = 0.35
+# watch = "#7bd88f"               # active watched-location ring
+# watch_opacity = 0.95            # ring stroke (active rings; inactive stay faded)
+# watch_fill_opacity = 0.15       # ring fill

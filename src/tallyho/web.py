@@ -35,6 +35,7 @@ import secrets
 import signal
 import threading
 from contextlib import asynccontextmanager
+from dataclasses import asdict
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Literal
@@ -300,8 +301,9 @@ def create_app(cfg: Config, store: Store, ntfy_sink=None, bus=None,
         """Front-end bootstrap config. ``tz`` is the IANA timezone the dashboard
         renders all times in (from ``TZ``/``TALLYHO_DISPLAY_TZ``); the browser
         formats with it so the clock matches the server's configured zone rather
-        than each viewer's local one."""
-        return {"tz": display_tz_name(cfg)}
+        than each viewer's local one. ``colors`` is the ``[colors]`` section (the
+        map palette), injected as CSS variables before the first paint."""
+        return {"tz": display_tz_name(cfg), "colors": asdict(cfg.colors)}
 
     @app.get("/api/health")
     def health():

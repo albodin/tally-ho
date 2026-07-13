@@ -73,6 +73,28 @@ class NotifyConfig:
 
 
 @dataclass(slots=True)
+class ColorsConfig:
+    # Dashboard map colors + opacities. Served by /api/config and injected as
+    # CSS variables when the dashboard page loads (dashboard.js), so an edit
+    # applies on the next page load - no restart. settings_meta keys the kind
+    # off this section: fields ending in "_opacity" are floats in [0, 1],
+    # everything else is a "#rrggbb" hex color (a color picker in the UI).
+    track: str = "#5ad1c8"               # flown-track line
+    track_opacity: float = 0.85
+    path_measured: str = "#4ea1ff"       # predicted path, measured winds
+    path_gfs: str = "#a98bff"            # predicted path, model (GFS) winds
+    path_extrapolation: str = "#8b9bb0"  # predicted path, extrapolated winds
+    path_opacity: float = 0.8
+    prediction: str = "#ffb454"          # predicted landing marker + uncertainty circle
+    prediction_fill_opacity: float = 0.08  # uncertainty-circle fill
+    landing: str = "#7bd88f"             # actual-landing dot
+    landing_fill_opacity: float = 0.35
+    watch: str = "#7bd88f"               # active watched-location ring
+    watch_opacity: float = 0.95          # ring stroke (active; inactive is fixed)
+    watch_fill_opacity: float = 0.15     # ring fill (active)
+
+
+@dataclass(slots=True)
 class WebConfig:
     # Local dashboard / onboarding UI (optional `api` extra). Login required
     # (account created by the first-run setup wizard), so LAN binds are fine -
@@ -100,6 +122,7 @@ class Config(engine_config.Config):
     roi: ROIConfig = field(default_factory=ROIConfig)
     notify: NotifyConfig = field(default_factory=NotifyConfig)
     web: WebConfig = field(default_factory=WebConfig)
+    colors: ColorsConfig = field(default_factory=ColorsConfig)
 
 
 def load_config(path: str | Path | None = None) -> Config:

@@ -22,7 +22,10 @@ function renderValue(spec, value) {
 function parseValue(spec, input) {
   if (spec.kind === "bool") return input.checked;
   const raw = input.value.trim();
-  if (spec.kind === "str" || spec.kind === "enum") return spec.kind === "str" ? input.value : raw;
+  // color inputs always hold a browser-normalized lowercase "#rrggbb"
+  if (spec.kind === "str" || spec.kind === "enum" || spec.kind === "color") {
+    return spec.kind === "str" ? input.value : raw;
+  }
   if (spec.kind === "opt_int") {
     if (raw === "") return null;
     const n = Number(raw);
@@ -70,6 +73,11 @@ function makeInput(spec) {
       opt.selected = c === spec.value;
       input.appendChild(opt);
     }
+  } else if (spec.kind === "color") {
+    input = document.createElement("input");
+    input.type = "color";                    // native swatch + picker
+    input.value = spec.value;
+    input.title = `default ${spec.default}`; // color inputs can't show a placeholder
   } else {
     input = document.createElement("input");
     if (spec.kind === "int") { input.type = "number"; input.step = "1"; }

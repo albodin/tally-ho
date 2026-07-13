@@ -71,6 +71,10 @@ _CHOICES: dict[tuple[str | None, str], tuple[str, ...]] = {
 _RANGES: dict[tuple[str | None, str], tuple[float | None, float | None]] = {
     ("dem", "download_workers"): (1, 16),          # clamp in dem.download_dem_tiles
     ("dem", "download_check_seconds"): (30, None),  # clamp in App._dem_loop
+    # CSS/Leaflet clamp opacity to [0, 1]; validate so the map never gets a
+    # value it would silently reinterpret
+    **{("colors", f.name): (0, 1) for f in fields(Config().colors)
+       if f.name.endswith("_opacity")},
 }
 
 
@@ -78,7 +82,7 @@ _RANGES: dict[tuple[str | None, str], tuple[float | None, float | None]] = {
 class FieldSpec:
     section: str | None      # None = top-level Config key
     key: str
-    kind: str                # str | float | int | bool | enum | int_list | opt_int
+    kind: str                # str | float | int | bool | enum | int_list | opt_int | color
     default: object
     help: str                # from the template's comments; may be ""
     choices: tuple[str, ...] | None
@@ -94,6 +98,10 @@ class FieldSpec:
 
 def _kind_of(section: str | None, key: str, default: object) -> str:
     sk = (section, key)
+    # [colors] fields are "#rrggbb" hex colors by construction (ColorsConfig),
+    # except the *_opacity floats, which fall through to the numeric kinds
+    if section == "colors" and not key.endswith("_opacity"):
+        return "color"
     if sk in _SPECIAL_KINDS:
         return _SPECIAL_KINDS[sk]
     if sk in _CHOICES:
@@ -271,6 +279,12 @@ def coerce(spec: FieldSpec, value: object) -> object:
         if isinstance(value, str):
             return value
         raise ValueError("expected a string")
+    if kind == "color":
+        # exactly 6 hex digits: the map JS builds "#rrggbbaa" alpha variants by
+        # suffixing, and <input type="color"> only speaks this form
+        if isinstance(value, str) and re.fullmatch(r"#[0-9a-fA-F]{6}", value):
+            return value.lower()
+        raise ValueError('expected a hex color like "#4ea1ff"')
     if kind == "enum":
         if isinstance(value, str) and value in (spec.choices or ()):
             return value

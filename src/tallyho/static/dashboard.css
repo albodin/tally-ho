@@ -1,6 +1,13 @@
 /* Dashboard-only layout: header, map, tables, the watched-location form.
    Palette and base controls come from theme.css. */
-:root { --track:#5ad1c8; --gfs:#a98bff; }  /* map-line colors, read by JS via cssVar() */
+/* Map palette fallbacks, read by JS via cssVar()/cssNum(). The configured
+   [colors] section (see ColorsConfig in config.py - same defaults) is
+   injected over these at page load from /api/config (dashboard.js loadConfig). */
+:root { --track:#5ad1c8; --path-measured:#4ea1ff; --path-gfs:#a98bff;
+        --path-extrapolation:#8b9bb0; --prediction:#ffb454; --landing:#7bd88f;
+        --watch:#7bd88f;
+        --track-opacity:.85; --path-opacity:.8; --prediction-fill-opacity:.08;
+        --landing-fill-opacity:.35; --watch-opacity:.95; --watch-fill-opacity:.15; }
 header { padding:10px 16px; border-bottom:1px solid var(--line); display:flex;
          align-items:baseline; gap:14px; flex-wrap:wrap; }
 header h1 { font-size:18px; margin:0; }

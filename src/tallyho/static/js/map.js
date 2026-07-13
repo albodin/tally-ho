@@ -1,7 +1,7 @@
 // The Leaflet map: layers, drawn icons and the 15 s rebuild (refreshMap).
 // Leaflet itself is vendored (static/vendor/leaflet) and loaded as a classic
 // script before the modules, so `L` is a global here.
-import { api, cssVar, esc, fnum, hhmm } from "./util.js";
+import { api, cssNum, cssVar, esc, fnum, hhmm } from "./util.js";
 
 // preferCanvas: tracks/paths/circles render to one canvas instead of an SVG
 // node per shape - SVG re-projection of thousands of points is what made
@@ -31,15 +31,24 @@ L.control.layers(null, {
   "Prediction history": historyLayer
 }, { collapsed: false }).addTo(map);
 
-export const SOURCE_COLOR = {
-  measured: cssVar("--accent"), gfs: cssVar("--gfs"), extrapolation: cssVar("--muted"),
-};
+// Map colors are read at *draw* time, not module load: the CSS variables
+// (dashboard.css fallbacks) are overwritten by the configured [colors]
+// palette from /api/config, which arrives after this module is evaluated
+// (see dashboard.js loadConfig).
+const SOURCE_VAR = { measured: "--path-measured", gfs: "--path-gfs",
+                     extrapolation: "--path-extrapolation" };
+// dashed predicted path + prediction-history dots, colored by wind source;
+// unknown sources fall back to the prediction color
+export const sourceColor = (src) => cssVar(SOURCE_VAR[src] || "--prediction");
 // solid line = where the sonde has actually been (vs the dashed predicted path)
-export const TRACK_COLOR = cssVar("--track");
-export const WARN_COLOR = cssVar("--warn");
+export const trackColor = () => cssVar("--track");
+export const predColor = () => cssVar("--prediction");
 // actual-landing dot, shared with the history overlay
-export const LANDING_STYLE = { radius:5, color:cssVar("--ok"), weight:2,
-                               fillColor:"#244a30", fillOpacity:.9 };
+export const landingStyle = () => {
+  const c = cssVar("--landing");
+  return { radius:5, color:c, weight:2, fillColor:c,
+           fillOpacity: cssNum("--landing-fill-opacity") };
+};
 
 // ---- drawn SVG icons (consistent everywhere, unlike OS emoji fonts) ----
 // The fills inside are illustration colors (balloon shades, parachute canvas),
@@ -80,11 +89,14 @@ const rocketSvg =
     <path d="M9 19.3 h4 l-.5 2 h-3 z" fill="#8a97a8"/>
     <path d="M11 21.5 c1.6 2.2 1.6 4.3 0 7 c-1.6 -2.7 -1.6 -4.8 0 -7 z" fill="#ffb454" stroke="#e07b1f" stroke-width=".7"/>
   </svg>`;
-const targetSvg =
+// crosshair in the (configurable) prediction color; the ring fill is the same
+// color with an "aa" hex-alpha suffix, which works because colors are
+// validated to 6-digit "#rrggbb" (settings_meta)
+const targetSvg = (c) =>
   `<svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 26 26">
-    <circle cx="13" cy="13" r="9" fill="rgba(255,180,84,.18)" stroke="#ffb454" stroke-width="2"/>
-    <circle cx="13" cy="13" r="3.2" fill="#ffb454"/>
-    <path d="M13 1 v5 M13 20 v5 M1 13 h5 M20 13 h5" stroke="#ffb454" stroke-width="2" stroke-linecap="round"/>
+    <circle cx="13" cy="13" r="9" fill="${c}2e" stroke="${c}" stroke-width="2"/>
+    <circle cx="13" cy="13" r="3.2" fill="${c}"/>
+    <path d="M13 1 v5 M13 20 v5 M1 13 h5 M20 13 h5" stroke="${c}" stroke-width="2" stroke-linecap="round"/>
   </svg>`;
 // balloon-pop starburst, marking where the ascent ends and the fall begins
 const burstSvg = (fill, stroke) =>
@@ -100,13 +112,17 @@ const FLIGHT_ICONS = {
 };
 const flightIcon = (state) => FLIGHT_ICONS[state] || FLIGHT_ICONS.ASCENT;
 const launchIcon = svgIcon(rocketSvg, 22, 30, [11, 28], [0, -26]);
-// predicted landing spot - a crosshair, not Leaflet's oversized default pin
-export const predIcon = svgIcon(targetSvg, 26, 26, [13, 13], [0, -12]);
-// burst markers: solid red pop = observed (on the flown track / history
-// overlay); hollow orange = predicted (on the dashed pre-burst path, matching
-// the crosshair's palette)
+// predicted landing spot - a crosshair, not Leaflet's oversized default pin.
+// Built per draw (like predBurstIcon) so it follows the configured color.
+export const predIcon = () => svgIcon(targetSvg(predColor()), 26, 26, [13, 13], [0, -12]);
+// burst markers: solid red pop = observed (an illustration color, like the
+// balloons); hollow = predicted (on the dashed pre-burst path, matching the
+// crosshair's palette)
 export const burstIcon = svgIcon(burstSvg("#e5484d", "#8c1d22"), 18, 18, [9, 9], [0, -8]);
-const predBurstIcon = svgIcon(burstSvg("rgba(255,180,84,.3)", "#ffb454"), 18, 18, [9, 9], [0, -8]);
+const predBurstIcon = () => {
+  const c = predColor();
+  return svgIcon(burstSvg(`${c}4d`, c), 18, 18, [9, 9], [0, -8]);
+};
 
 let didFit = false;
 let lastMapJson = "";
@@ -126,7 +142,8 @@ export async function refreshMap() {
     if (p.kind === "track") {
       // solid line of where the sonde has actually flown (launch → now)
       const line = f.geometry.coordinates.map(([lon, lat]) => [lat, lon]);
-      L.polyline(line, { color: TRACK_COLOR, weight:2, opacity:.85 }).bindPopup(
+      L.polyline(line, { color: trackColor(), weight:2,
+        opacity: cssNum("--track-opacity") }).bindPopup(
         `<b>${esc(p.serial)}</b> flown track`
       ).addTo(trackLayer);
       // observed burst point (the track's apogee), once the tracker called it
@@ -141,13 +158,13 @@ export async function refreshMap() {
     if (p.kind === "path") {
       // GeoJSON LineString: [[lon, lat], ...] → Leaflet [lat, lon]
       const line = f.geometry.coordinates.map(([lon, lat]) => [lat, lon]);
-      L.polyline(line, { color: SOURCE_COLOR[p.source] || WARN_COLOR, weight:2,
-        opacity:.8, dashArray:"6,6" }).bindPopup(
+      L.polyline(line, { color: sourceColor(p.source), weight:2,
+        opacity: cssNum("--path-opacity"), dashArray:"6,6" }).bindPopup(
         `<b>${esc(p.serial)}</b> predicted path<br>source ${esc(p.source)} · land ${hhmm(p.eta)}`
       ).addTo(pathLayer);
       // pre-burst paths carry their predicted burst point (~ marks an estimate)
       if (p.burst_lat != null)
-        L.marker([p.burst_lat, p.burst_lon], { icon: predBurstIcon }).bindPopup(
+        L.marker([p.burst_lat, p.burst_lon], { icon: predBurstIcon() }).bindPopup(
           `<b>${esc(p.serial)}</b> predicted burst<br>${fnum(p.burst_lat,5)}, ${fnum(p.burst_lon,5)}`
           + `<br>~${fnum(p.burst_alt,0)} m`
         ).addTo(pathLayer);
@@ -169,25 +186,29 @@ export async function refreshMap() {
       pts.push([lat, lon]);
     } else if (p.kind === "prediction") {
       L.circle([lat, lon], { radius:(p.uncertainty_radius_km||0)*1000,
-        color: WARN_COLOR, weight:1, fillOpacity:.08 }).addTo(predLayer);
-      L.marker([lat, lon], { icon: predIcon }).bindPopup(
+        color: predColor(), weight:1,
+        fillOpacity: cssNum("--prediction-fill-opacity") }).addTo(predLayer);
+      L.marker([lat, lon], { icon: predIcon() }).bindPopup(
         `<b>${esc(p.serial)}</b> predicted landing<br>${fnum(lat,5)}, ${fnum(lon,5)}`
         + `<br>ETA ${hhmm(p.eta)} · ±${fnum(p.uncertainty_radius_km,1)} km · ${esc(p.source)}`
       ).addTo(predLayer);
       pts.push([lat, lon]);
     } else if (p.kind === "landing") {
-      L.circleMarker([lat, lon], LANDING_STYLE).bindPopup(
+      L.circleMarker([lat, lon], landingStyle()).bindPopup(
         `<b>${esc(p.serial)}</b> (${esc(p.ftype||"?")}) landed<br>${fnum(lat,5)}, ${fnum(lon,5)}`
         + `<br>${hhmm(p.landed_at)} · ${fnum(p.alt,0)} m · ${esc(p.detected_by||"")}`
       ).addTo(landingLayer);
       pts.push([lat, lon]);
     } else if (p.kind === "subscriber") {
-      // pure range ring - non-interactive so clicks pass through to sondes underneath
+      // pure range ring - non-interactive so clicks pass through to sondes
+      // underneath; inactive rings stay a fixed "disabled" gray
+      const ringColor = p.active ? cssVar("--watch") : "#5a6a7a";
       L.circle([lat, lon], { radius:(p.radius_km||0)*1000,
-        color: p.active ? "#a8f0bd" : "#5a6a7a", weight: p.active ? 3 : 1.5, dashArray:"5,5",
-        opacity: p.active ? .95 : .5,
-        fillColor: p.active ? "#7bd88f" : "#5a6a7a",
-        fillOpacity: p.active ? .15 : .04, interactive:false }).addTo(subLayer);
+        color: ringColor, weight: p.active ? 3 : 1.5, dashArray:"5,5",
+        opacity: p.active ? cssNum("--watch-opacity") : .5,
+        fillColor: ringColor,
+        fillOpacity: p.active ? cssNum("--watch-fill-opacity") : .04,
+        interactive:false }).addTo(subLayer);
       pts.push([lat, lon]);
     }
   }

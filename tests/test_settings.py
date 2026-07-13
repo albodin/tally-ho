@@ -39,7 +39,7 @@ def test_every_knob_has_a_spec_and_nothing_else():
 
 
 def test_spec_defaults_and_kinds_match_the_dataclasses():
-    known = {"str", "float", "int", "bool", "enum", "int_list", "opt_int"}
+    known = {"str", "float", "int", "bool", "enum", "int_list", "opt_int", "color"}
     leaves = _leaves()
     for s in field_specs():
         assert s.kind in known, s.dotted
@@ -105,6 +105,10 @@ def test_env_override_flags_exactly_the_set_vars(monkeypatch):
     ("display_tz", "Europe/Rome", "Europe/Rome"),
     ("dem.download_workers", 16, 16),              # at the range bound
     ("dem.download_check_seconds", 30, 30.0),
+    ("colors.track", "#5AD1C8", "#5ad1c8"),        # normalized to lowercase
+    ("colors.landing", "#7bd88f", "#7bd88f"),
+    ("colors.track_opacity", 0.5, 0.5),            # opacities are plain floats
+    ("colors.watch_fill_opacity", 1, 1.0),         # at the range bound
 ])
 def test_coerce_accepts(dotted, value, expected):
     assert coerce(_spec(dotted), value) == expected
@@ -123,6 +127,13 @@ def test_coerce_accepts(dotted, value, expected):
     ("dem.download_workers", 0),            # below the range
     ("dem.download_workers", 64),           # above the range (runtime clamps at 16)
     ("dem.download_check_seconds", 5),      # below the loop's 30 s floor
+    ("colors.track", "red"),                # named colors aren't accepted
+    ("colors.track", "#abc"),               # 3-digit hex breaks the JS alpha suffixing
+    ("colors.track", "#12345g"),            # not hex
+    ("colors.track", 0xffffff),             # not a string
+    ("colors.track_opacity", 1.5),          # opacity outside [0, 1]
+    ("colors.track_opacity", -0.1),
+    ("colors.track_opacity", "0.5"),        # string is not a number
 ])
 def test_coerce_rejects(dotted, value):
     with pytest.raises(ValueError):
@@ -303,6 +314,18 @@ def test_put_settings_noop_touches_nothing(client):
     assert r.status_code == 200
     assert r.json()["changed"] == []
     assert client.config_path.read_text() == before
+
+
+def test_put_settings_color_roundtrip(client):
+    """A map-color edit hot-applies, persists, and reaches the dashboard's
+    bootstrap endpoint (which is where the map actually reads it from)."""
+    r = client.put("/api/settings", json={"values": {"colors.track": "#FF0000"}})
+    assert r.status_code == 200
+    assert r.json()["changed"] == ["colors.track"]
+    assert r.json()["restart_required"] == []
+    assert client.cfg.colors.track == "#ff0000"    # normalized lowercase
+    assert client.get("/api/config").json()["colors"]["track"] == "#ff0000"
+    assert load_config(client.config_path).colors.track == "#ff0000"
 
 
 def test_put_settings_seed_roundtrip(client):

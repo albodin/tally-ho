@@ -167,7 +167,12 @@ def test_stats(client):
 
 def test_client_config_default_utc(client, monkeypatch):
     monkeypatch.delenv("TZ", raising=False)  # default must be UTC regardless of host
-    assert client.get("/api/config").json() == {"tz": "UTC"}
+    from dataclasses import asdict
+    body = client.get("/api/config").json()
+    assert body["tz"] == "UTC"
+    # the full [colors] palette ships for the dashboard's CSS-variable injection
+    assert body["colors"] == asdict(Config().colors)
+    assert body["colors"]["track"] == "#5ad1c8"
 
 
 def test_client_config_reports_display_tz():
@@ -175,7 +180,7 @@ def test_client_config_reports_display_tz():
     try:
         c = TestClient(create_app(Config(display_tz="America/New_York"), store))
         login(c, store)
-        assert c.get("/api/config").json() == {"tz": "America/New_York"}
+        assert c.get("/api/config").json()["tz"] == "America/New_York"
     finally:
         store.close()
 

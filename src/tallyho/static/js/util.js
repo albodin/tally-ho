@@ -7,6 +7,12 @@ export const $ = (id) => document.getElementById(id);
 // never defined twice.
 export const cssVar = (name) =>
   getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+// numeric CSS variable (the configurable map opacities); a missing/broken
+// value degrades to fully opaque rather than an invisible NaN
+export const cssNum = (name) => {
+  const v = parseFloat(cssVar(name));
+  return Number.isFinite(v) ? v : 1;
+};
 
 export const fnum = (v, d=4) => (v === null || v === undefined) ? "-" : Number(v).toFixed(d);
 export const esc = (s) => (s ?? "").toString().replace(/[&<>"]/g, c =>

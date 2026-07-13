@@ -18,11 +18,18 @@ async function refreshHealth() {
   } catch (e) { $("health").textContent = "offline"; }
 }
 
-// One-time: learn which timezone to render times in (see util.js). On
-// failure we keep the UTC default rather than block the dashboard.
+// One-time: learn which timezone to render times in (see util.js) and inject
+// the configured [colors] palette as CSS variables - the map/history modules
+// read colors via cssVar() at draw time, so the first paint (after this
+// resolves) already uses them. On failure we keep the UTC default and the
+// stylesheet's fallback palette rather than block the dashboard.
 async function loadConfig() {
-  try { const c = await api("/api/config"); if (c && c.tz) setDisplayTz(c.tz); }
-  catch (e) { /* keep UTC */ }
+  try {
+    const c = await api("/api/config");
+    if (c && c.tz) setDisplayTz(c.tz);
+    for (const [k, v] of Object.entries(c.colors || {}))  // track -> --track, path_opacity -> --path-opacity, ...
+      document.documentElement.style.setProperty("--" + k.replaceAll("_", "-"), String(v));
+  } catch (e) { /* keep the defaults */ }
 }
 
 async function refreshAll() {

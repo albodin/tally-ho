@@ -1,9 +1,9 @@
 // Per-sonde prediction history: the panel (table + SVG chart) and its map
 // overlay. Distance semantics: vs the actual landing once recorded, else vs
 // the current latest prediction (drift) - the backend picks and reports which.
-import { $, api, cssVar, esc, fnum, hhmm } from "./util.js";
-import { LANDING_STYLE, SOURCE_COLOR, TRACK_COLOR, WARN_COLOR,
-         burstIcon, historyLayer, map, predIcon } from "./map.js";
+import { $, api, cssNum, cssVar, esc, fnum, hhmm } from "./util.js";
+import { burstIcon, historyLayer, landingStyle, map, predIcon,
+         sourceColor, trackColor } from "./map.js";
 
 const LINE = cssVar("--line"), MUTED = cssVar("--muted"),
       ACCENT = cssVar("--accent"), BAD = cssVar("--bad");
@@ -44,15 +44,16 @@ function renderHistChart(preds, ref) {
   const apts = pts.filter(p => p.alt_at_pred != null);
   let altLine = "", altAxis = "";
   if (apts.length) {
+    const trackC = trackColor();
     const amax = Math.max(...apts.map(p => p.alt_at_pred)) || 1;
     const ya = a => padT + (H - padT - padB) * (1 - a / amax);
-    altLine = apts.length > 1 ? `<polyline fill="none" stroke="${TRACK_COLOR}"
+    altLine = apts.length > 1 ? `<polyline fill="none" stroke="${trackC}"
       stroke-width="1.2" stroke-dasharray="4,3" opacity=".8"
       points="${apts.map(p => `${x(Date.parse(p.predicted_at))},${ya(p.alt_at_pred)}`).join(" ")}"/>` : "";
     altAxis = [0, amax / 2, amax].map(v =>
-      `<text x="${W - padR + 6}" y="${ya(v) + 4}" font-size="11" fill="${TRACK_COLOR}">${fnum(v / 1000, 1)}</text>`
+      `<text x="${W - padR + 6}" y="${ya(v) + 4}" font-size="11" fill="${trackC}">${fnum(v / 1000, 1)}</text>`
     ).join("") + `<text x="${W - padR}" y="${padT - 5}" text-anchor="end"
-      font-size="11" fill="${TRACK_COLOR}">altitude km</text>`;
+      font-size="11" fill="${trackC}">altitude km</text>`;
   }
   const line = pts.length > 1 ? `<polyline fill="none" stroke="${ACCENT}" stroke-width="1.5"
     points="${pts.map((p, i) => `${x(ts[i])},${y(p.distance_km)}`).join(" ")}"/>` : "";
@@ -60,7 +61,7 @@ function renderHistChart(preds, ref) {
   // <title> tooltip - hover anywhere near a point to read its values
   const dots = pts.map((p, i) =>
     `<g><circle cx="${x(ts[i])}" cy="${y(p.distance_km)}" r="${i === pts.length - 1 ? 4 : 2.5}"
-      fill="${SOURCE_COLOR[p.source] || WARN_COLOR}"/>
+      fill="${sourceColor(p.source)}"/>
     <circle cx="${x(ts[i])}" cy="${y(p.distance_km)}" r="7" fill="transparent"
       ><title>${histTip(p)}</title></circle></g>`).join("");
   el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg"
@@ -102,7 +103,8 @@ function drawHistoryOverlay(d) {
   const preds = d.predictions, n = preds.length, pts = [];
   if (d.track.length > 1) {
     // flown track of a LANDED flight - active flights' tracks are already on the map
-    L.polyline(d.track.map(p => [p[0], p[1]]), { color: TRACK_COLOR, weight:2, opacity:.85 })
+    L.polyline(d.track.map(p => [p[0], p[1]]),
+      { color: trackColor(), weight:2, opacity: cssNum("--track-opacity") })
       .bindPopup(`<b>${esc(d.serial)}</b> flown track`).addTo(historyLayer);
   }
   if (d.burst) {
@@ -119,7 +121,7 @@ function drawHistoryOverlay(d) {
   preds.forEach((p, i) => {
     const fade = .25 + .75 * (n > 1 ? i / (n - 1) : 1);   // older → fainter
     L.circleMarker([p.land_lat, p.land_lon], {
-      radius:4, color: SOURCE_COLOR[p.source] || WARN_COLOR, weight:1.5,
+      radius:4, color: sourceColor(p.source), weight:1.5,
       opacity: fade, fillOpacity: .5 * fade,
     }).bindTooltip(histTip(p)).bindPopup(
       `<b>${esc(d.serial)}</b> prediction at ${hhmm(p.predicted_at)}`
@@ -130,14 +132,14 @@ function drawHistoryOverlay(d) {
   });
   if (n) {
     const last = preds[n - 1];
-    L.marker([last.land_lat, last.land_lon], { icon: predIcon })
+    L.marker([last.land_lat, last.land_lon], { icon: predIcon() })
       .bindTooltip(`latest prediction · ${histTip(last)}`).bindPopup(
       `<b>${esc(d.serial)}</b> latest prediction (${hhmm(last.predicted_at)})`
     ).addTo(historyLayer);
   }
   if (d.landing) {
     const lnd = d.landing;
-    L.circleMarker([lnd.land_lat, lnd.land_lon], LANDING_STYLE)
+    L.circleMarker([lnd.land_lat, lnd.land_lon], landingStyle())
       .bindTooltip(`actual landing · ${hhmm(lnd.landed_at)}`).bindPopup(
       `<b>${esc(d.serial)}</b> actual landing<br>${fnum(lnd.land_lat,5)}, ${fnum(lnd.land_lon,5)}`
       + `<br>${hhmm(lnd.landed_at)} · ${esc(lnd.detected_by||"")}`
