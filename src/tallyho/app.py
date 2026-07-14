@@ -35,6 +35,11 @@ log = logging.getLogger(__name__)
 # ghost flights mid-air forever - that is the very bug recovery exists to fix).
 _RECOVERY_HOLD_MAX_SECONDS = 1800.0
 
+# Above this many queued raw frames the consumer is visibly behind real time:
+# shed optional work (pre-burst sweep) and defer the maintenance tick, whose
+# silence timeouts would misread queued-but-unprocessed flights as silent.
+_INGEST_BACKLOG_SHED = 5_000
+
 
 class App:
     def __init__(
@@ -366,6 +371,20 @@ class App:
         """Persist the actual landing position as accuracy ground truth."""
         if flight.last_lat is None or flight.last_lon is None:
             return
+        # A "landing" within landing_truth_min_fall_m of the flight's apogee
+        # never saw a real descent (e.g. GPS settling on the launch pad walked
+        # the state machine to LANDED pre-launch). A poisoned truth row is
+        # worse than none: it silently corrupts the accuracy/calibration
+        # metrics and, being upserted by (serial, launch_day), outlives
+        # rebuilds of the flight itself.
+        if (flight.last_alt is not None and flight.max_alt != float("-inf")
+                and flight.max_alt - flight.last_alt
+                < self.cfg.tracker.landing_truth_min_fall_m):
+            log.warning("not recording landing truth for %s: apogee %.0f m is "
+                        "only %.0f m above the landing fix - no real descent "
+                        "was observed", flight.serial, flight.max_alt,
+                        flight.max_alt - flight.last_alt)
+            return
         self.store.record_landing(
             serial=flight.serial, launch_day=flight.launch_day,
             land_lat=flight.last_lat, land_lon=flight.last_lon,
@@ -553,14 +572,24 @@ class App:
                 self.apply_backfills()
                 now_mono = time.monotonic()
                 if now_mono - last_tick >= self.cfg.tick_seconds:
-                    self.tick()
+                    # The silence sweeps compare wall-clock now to *sonde-time*
+                    # last_seen; while a backlog drains, every tracked flight
+                    # looks silent even though its frames are sitting in the
+                    # queue - a descent got expired mid-air that way
+                    # (26004618, 2026-07-13). Defer maintenance until caught up.
+                    backlog = raw_q.qsize()
+                    if backlog > _INGEST_BACKLOG_SHED:
+                        log.warning("ingest backlog %d; deferring maintenance tick",
+                                    backlog)
+                    else:
+                        self.tick()
                     self.write_heartbeat()
                     last_tick = now_mono
                 if now_mono - last_predict >= self.cfg.predict.predict_active_seconds:
                     # Shed the optional pre-burst sweep while behind on ingest -
                     # informational map paths must never starve frame processing.
                     backlog = raw_q.qsize()
-                    if backlog > 5_000:
+                    if backlog > _INGEST_BACKLOG_SHED:
                         log.warning("ingest backlog %d; skipping pre-burst sweep", backlog)
                     else:
                         self.predict_active()

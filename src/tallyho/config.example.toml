@@ -42,6 +42,13 @@
 [tracker]
 # burst_drop_m = 300.0              # alt below running max to call burst
 # burst_consecutive = 3
+# A flight may only enter DESCENT once its apogee is this far above the ground:
+# a sonde cold-starting on the launch pad can fake a sustained "descent" (GPS
+# altitude settling) and must not walk to DESCENT → LANDED before launch.
+# min_airborne_agl_m = 1000.0
+# Record a landing-truth row (accuracy ground truth) only when the flight
+# actually fell this far below its apogee - a bogus row corrupts calibration.
+# landing_truth_min_fall_m = 1000.0
 # ascent_min_gain_m = 500.0         # must climb this far above the first fix before a burst is recorded
 # burst_revert_climb_m = 500.0      # climb back above a called burst that undoes it (downdraft/GPS spike)
 # float_rate_abs_mps = 1.0

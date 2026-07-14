@@ -575,3 +575,105 @@ def test_restart_mid_descent_resumes_ballistic_fit(flight):
     assert model is not None
     assert model.n_points >= cfg.descent.min_fit_points
     assert model.b == pytest.approx(5.5, rel=0.1)
+
+
+def test_pad_gps_settling_never_enters_descent():
+    # A sonde cold-starting on the launch pad can emit a sustained fake
+    # "descent" while its GPS altitude settles downward. That used to walk the
+    # state machine to DESCENT → LANDED before launch, minting a landing-truth
+    # row and LANDED alert at the launch site (26004618, 2026-07-12). A flight
+    # whose apogee never cleared min_airborne_agl_m must not enter DESCENT.
+    cfg = Config()
+    tracker = FlightTracker(cfg, ground_fn=lambda lat, lon: 1459.0)
+    frames = []
+    fn = 0
+    for s in range(0, 90, 3):                      # settle 1900 → 1450 m
+        frames.append(_mk(39.12, -108.52, 1900.0 - 5.0 * s, s, fn))
+        fn += 1
+    for s in range(90, 300, 3):                    # then sit at the pad
+        frames.append(_mk(39.12, -108.52, 1459.0 + (s % 3), s, fn))
+        fn += 1
+    fl, states, events = run_flight(tracker, frames)
+    assert FlightState.DESCENT not in states
+    assert TrackerEvent.LANDED not in events
+    assert fl.state == FlightState.ASCENT
+
+
+def test_first_heard_falling_high_still_enters_descent():
+    # The never-airborne gate must not block a genuine descent first heard
+    # mid-air: its apogee (the first fix) is far above the ground.
+    cfg = Config()
+    tracker = FlightTracker(cfg, ground_fn=lambda lat, lon: 1459.0)
+    frames = [_mk(39.3, -109.2, 9000.0 - 30.0 * (3 * i), 3 * i, i)
+              for i in range(40)]
+    fl, states, _ = run_flight(tracker, frames)
+    assert fl.state == FlightState.DESCENT
+    assert fl.burst_alt is None            # burst never observed
+
+
+def test_expired_descent_reopens_and_lands_when_frames_resume():
+    # A DESCENT flight closed out by the silence sweep (dropped below the
+    # radio horizon) whose sonde later comes back into range: the close-out
+    # was premature, so tracking must resume - not leave a LANDED husk that
+    # swallows the rest of the flight (track kept updating but nothing
+    # predicted or recorded the real landing - 26004618, 2026-07-13).
+    cfg = Config()
+    tracker = FlightTracker(cfg)
+    frames = []
+    t, fn = 0, 0
+    for _ in range(120):                           # climb 200 → 6200 m
+        frames.append(_mk(45.0, 7.0, 200.0 + 50.0 * (t / 10), t, fn))
+        t += 10
+        fn += 1
+    alt = 6200.0
+    while alt > 5000.0:                            # fall to 5 km, then silence
+        frames.append(_mk(45.0, 7.0, alt, t, fn))
+        alt -= 90.0
+        t += 3
+        fn += 1
+    fl, _, _ = run_flight(tracker, frames)
+    assert fl.state == FlightState.DESCENT
+    lost = fl.last_seen + timedelta(
+        seconds=cfg.tracker.descent_lost_timeout_seconds + 60)
+    assert tracker.check_timeouts(lost) == [(fl, TrackerEvent.EXPIRED)]
+    assert fl.state == FlightState.LANDED
+
+    # back in range lower down: resumes DESCENT (no ghost NEW_FLIGHT), then
+    # genuinely lands with a LANDED event once it reaches the ground band
+    t += int(cfg.tracker.descent_lost_timeout_seconds) + 120
+    alt, events = 3500.0, []
+    while alt > 100.0:
+        fl, evs = tracker.update(_mk(45.0, 7.0, alt, t, fn))
+        events.extend(evs)
+        alt -= 60.0
+        t += 3
+        fn += 1
+    assert TrackerEvent.NEW_FLIGHT not in events
+    assert TrackerEvent.LANDED in events
+    assert fl.state == FlightState.LANDED
+    assert fl.landed_alt is not None       # a real landing, not an expiry
+
+
+def test_expired_ascent_reopens_and_bursts_on_return():
+    # Lost mid-ascent past ascent_lost_timeout_seconds → EXPIRED; the sonde
+    # reappears high and falling (its burst happened out of range): tracking
+    # resumes and the burst machinery takes it to DESCENT.
+    cfg = Config()
+    tracker = FlightTracker(cfg)
+    for s in range(0, 1200, 10):                   # climb 200 → 6150 m
+        flight, _ = tracker.update(_mk(45.0, 7.0, 200.0 + 5 * s, s, s))
+    assert flight.state == FlightState.ASCENT
+    lost = flight.last_seen + timedelta(
+        seconds=cfg.tracker.ascent_lost_timeout_seconds + 60)
+    assert tracker.check_timeouts(lost) == [(flight, TrackerEvent.EXPIRED)]
+    assert flight.state == FlightState.LANDED
+
+    t0 = 1190 + int(cfg.tracker.ascent_lost_timeout_seconds) + 120
+    alt, events = 5500.0, []
+    for i in range(40):
+        fl, evs = tracker.update(_mk(45.0, 7.0, alt, t0 + 3 * i, 2000 + i))
+        events.extend(evs)
+        alt -= 90.0
+    assert TrackerEvent.NEW_FLIGHT not in events
+    assert TrackerEvent.BURST in events
+    assert fl.state == FlightState.DESCENT

@@ -405,3 +405,26 @@ def test_roi_change_kicks_downloaders(store):
     app._gfs_kick.clear(), app._dem_kick.clear()
     app.reload_subscribers()
     assert not app._gfs_kick.is_set() and not app._dem_kick.is_set()
+
+
+def test_landing_truth_requires_real_fall(store):
+    # A "landing" whose fix sits just below the flight's apogee never saw a
+    # real descent - e.g. GPS settling on the launch pad walked the tracker to
+    # LANDED pre-launch (26004618, 2026-07-12). No truth row: a poisoned one
+    # corrupts calibration and outlives rebuilds of the flight.
+    from datetime import date
+
+    from windfall.tracker import Flight
+
+    app, _ = _app_with_sub(store, 39.1, -108.5)
+    pad = Flight(serial="PAD1", launch_day=date(2026, 7, 12),
+                 last_lat=39.12, last_lon=-108.52, last_alt=1460.0,
+                 max_alt=1463.0)
+    app._record_landing(pad, now=datetime.now(timezone.utc), detected_by="telemetry")
+    assert store.get_landing("PAD1", pad.launch_day) is None
+
+    real = Flight(serial="REAL1", launch_day=date(2026, 7, 12),
+                  last_lat=39.4, last_lon=-109.3, last_alt=1800.0,
+                  max_alt=34000.0)
+    app._record_landing(real, now=datetime.now(timezone.utc), detected_by="telemetry")
+    assert store.get_landing("REAL1", real.launch_day) is not None

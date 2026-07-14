@@ -344,6 +344,14 @@ def _coverage_scale(ratios: list[float], target: float) -> float:
     return s[lo] + (pos - lo) * (s[hi] - s[lo])
 
 
+# A landing-truth row this much older than the flight's *last* prediction is
+# self-contradictory - predictions are only made mid-air, so the flight was
+# demonstrably still flying after the recorded "landing". Seen when a bogus
+# truth row was minted pre-launch (GPS settling at the pad): scoring 45 good
+# descent predictions against the launch pad read as 75-96 km misses.
+_TRUTH_BEFORE_PREDICTION_SLACK_S = 900.0
+
+
 def accuracy_from_store(store: PredictionStore, limit: int = 200) -> list[ReplayResult]:
     """Build per-flight :class:`ReplayResult`s from *live* captured data: each
     recorded actual landing is the truth, scored against every prediction the
@@ -356,6 +364,15 @@ def accuracy_from_store(store: PredictionStore, limit: int = 200) -> list[Replay
         preds = store.predictions_for(lnd["serial"], launch_day)
         if not preds:
             continue
+        if lnd.get("landed_at"):
+            landed_at = datetime.fromisoformat(lnd["landed_at"])
+            last_pred = max(datetime.fromisoformat(p["predicted_at"]) for p in preds)
+            lag = (last_pred - landed_at).total_seconds()
+            if lag > _TRUTH_BEFORE_PREDICTION_SLACK_S:
+                log.warning("skipping %s: predictions ran %.0f min past the "
+                            "recorded landing - the truth row is suspect",
+                            lnd["serial"], lag / 60.0)
+                continue
         truth_lat, truth_lon = lnd["land_lat"], lnd["land_lon"]
         res = ReplayResult(serial=lnd["serial"], truth_lat=truth_lat,
                            truth_lon=truth_lon, launch_day=lnd["launch_day"])

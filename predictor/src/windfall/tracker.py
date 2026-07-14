@@ -83,6 +83,12 @@ class Flight:
     descent_b: float | None = None       # ballistic constant fitted at landing
     burst_t: float | None = None         # sonde time at burst detection (epoch s)
     landed_alt: float | None = None      # altitude when LANDED was declared (stable re-ascent anchor)
+    # State at a silence close-out (EXPIRED mid-air), None for real landings.
+    # If the sonde transmits again the silence was reception loss, not the
+    # flight ending - _resolve_flight resumes this state instead of letting
+    # the LANDED husk swallow the rest of the flight (frames would update the
+    # track but never predict, alert, or record the real landing).
+    expired_state: FlightState | None = None
     # transient runtime state
     prev_frame: Frame | None = None
     first_alt: float | None = None       # altitude of the first frame seen this session
@@ -261,6 +267,7 @@ class FlightTracker:
                 # NOT record its last mid-air position as a landing.
                 log.info("expiring stale flight %s (silent %.0f s at %.0f m)",
                          flight.serial, gap, flight.last_alt)
+                flight.expired_state = flight.state
                 flight.state = FlightState.LANDED
                 self._persist(flight, profile=True)
                 out.append((flight, TrackerEvent.EXPIRED))
@@ -273,6 +280,7 @@ class FlightTracker:
                 # the last fix is mid-ascent, nowhere near where it came down.
                 log.info("expiring lost ascent flight %s (silent %.0f s at "
                          "%.0f m)", flight.serial, gap, flight.last_alt)
+                flight.expired_state = flight.state
                 flight.state = FlightState.LANDED
                 self._persist(flight, profile=True)
                 out.append((flight, TrackerEvent.EXPIRED))
@@ -294,6 +302,7 @@ class FlightTracker:
                 log.info("descent flight %s lost above ground band (%.0f m, "
                          "silent %.0f s); closing out", flight.serial,
                          flight.last_alt, gap)
+                flight.expired_state = flight.state
                 flight.state = FlightState.LANDED
                 # no landing truth, but the chute fit is still good climatology
                 self._finalize_descent_b(flight)
@@ -364,6 +373,24 @@ class FlightTracker:
         key = self._active_key.get(frame.serial)
         if key is not None:
             flight = self.flights[key]
+            if flight.state == FlightState.LANDED and flight.expired_state is not None:
+                # Closed out by a silence timeout mid-air, but the sonde is
+                # transmitting again: the silence was reception loss, not the
+                # flight ending. Resume the state it was expired from - the
+                # ordinary transition machinery re-sorts it (a reopened ASCENT
+                # that is actually falling calls its burst within a few
+                # frames). Without this the LANDED husk swallowed the rest of
+                # the flight: frames kept updating the track but nothing
+                # predicted, alerted, or recorded the real landing
+                # (26004618, 2026-07-13, expired mid-descent at 22 km).
+                log.info("%s transmitting again %.0f s after its timeout "
+                         "close-out; resuming %s", flight.serial,
+                         frame.t - (flight.last_t or frame.t),
+                         flight.expired_state.value)
+                flight.state = flight.expired_state
+                flight.expired_state = None
+                flight.reascent_count = 0
+                return flight, []
             if flight.state != FlightState.LANDED or not self._is_new_ascent(flight, frame):
                 return flight, []
         # new flight (first sighting, or a fresh ascent for a reused serial)
@@ -515,6 +542,15 @@ class FlightTracker:
         else:
             flight.neg_rate_count = 0
         if flight.neg_rate_count < tcfg.burst_consecutive:
+            return
+        # Never meaningfully airborne? A sonde cold-starting on the launch pad
+        # can emit a sustained fake "descent" (GPS altitude settling downward),
+        # and a flight that never left the ground must not enter DESCENT - it
+        # would immediately "land" at the pad and mint a bogus landing-truth
+        # row and LANDED alert. Genuine flights, including those first heard
+        # already falling, have their apogee far above the ground.
+        ground = self.ground_fn(frame.lat, frame.lon)
+        if flight.max_alt < ground + tcfg.min_airborne_agl_m:
             return
         # A sustained drop below the running max: the sonde is descending, so
         # start tracking it as such (this is what drives the landing prediction).

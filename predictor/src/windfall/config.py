@@ -22,6 +22,20 @@ log = logging.getLogger(__name__)
 class TrackerConfig:
     burst_drop_m: float = 300.0            # alt below running max to call burst
     burst_consecutive: int = 3             # consecutive negative-rate frames
+    # A flight may only enter DESCENT once its apogee is this far above the
+    # ground. A sonde cold-starting on the launch pad can emit a sustained
+    # fake "descent" (GPS altitude settling downward), which used to walk the
+    # state machine to DESCENT → LANDED and mint a landing-truth row + LANDED
+    # alert *at the launch site* (26004618, 2026-07-12). Genuine flights -
+    # watched from launch or first heard already falling - are far above this.
+    # Note: with no DEM wired the ground is flat 0 m, so at high-elevation
+    # sites this gate degrades to an MSL check.
+    min_airborne_agl_m: float = 1000.0
+    # Record a landing-truth row (accuracy ground truth) only when the flight
+    # actually fell this far. Defense in depth behind min_airborne_agl_m: a
+    # "landing" whose fix is within this of the flight's apogee never saw a
+    # real descent, and a poisoned truth row silently corrupts calibration.
+    landing_truth_min_fall_m: float = 1000.0
     # A burst altitude is only *recorded* (and fed to the per-site prior) once the
     # flight has been observed to genuinely climb this far above its first fix. A
     # sonde first heard already descending (launched out of range, drifted into
