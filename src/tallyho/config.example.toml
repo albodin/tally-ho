@@ -69,6 +69,15 @@
 # launch_max_agl_m = 1500.0         # claim a launch site only if first heard this low
 # new_ascent_climb_m = 500.0        # climb above the landing alt to declare a relaunch
 # new_ascent_consecutive = 3        # ...sustained for this many frames (GPS noise gate)
+# A timeout landing is provisional: frames heard later this far below the
+# declared landing altitude mean the sonde is still falling - the descent
+# reopens and the real landing supersedes the provisional one.
+# redescent_drop_m = 150.0
+# redescent_consecutive = 3         # ...sustained for this many frames (GPS noise gate)
+# Ground pings heard after a timeout landing refine the recorded position once
+# they move this far horizontally (or this much lower); sized above GPS wander.
+# landing_refine_move_m = 50.0
+# landing_refine_alt_m = 30.0
 # Flown-track breadcrumb capture (the actual path on the map): keep a point once
 # the sonde moves this far horizontally, OR this much vertically, OR this long passes.
 # track_min_move_m = 250.0

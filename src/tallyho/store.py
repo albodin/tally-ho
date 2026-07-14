@@ -588,6 +588,23 @@ class Store:
             )
             self._commit("accuracy")
 
+    def retract_landing(self, serial: str, launch_day: date) -> None:
+        """Erase a provisional landing - the truth row and the LANDED alert
+        de-dup rows - because the flight turned out to still be airborne (a
+        timeout landing contradicted by later, lower telemetry). Deleting the
+        alert rows lets the real landing re-alert with the corrected position;
+        INBOUND/UPDATE rows stay (still true, still needed for throttling)."""
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM landings WHERE serial=? AND launch_day=?",
+                (serial, launch_day.isoformat()),
+            )
+            self._conn.execute(
+                "DELETE FROM alerts WHERE serial=? AND launch_day=? AND alert_type=?",
+                (serial, launch_day.isoformat(), AlertType.LANDED.value),
+            )
+            self._commit("accuracy", "alerts")
+
     def get_landing(self, serial: str, launch_day: date) -> dict | None:
         with self._lock:
             cur = self._conn.execute(

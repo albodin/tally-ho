@@ -61,6 +61,10 @@ class TrackerEvent(str, enum.Enum):
     # Signal lost long ago mid-air: the flight is closed out (state LANDED) but
     # its last position is NOT a landing - no ground truth is recorded.
     EXPIRED = "EXPIRED"
+    # A silence close-out contradicted by the sonde transmitting again: the
+    # flight reopened (its prior state, or DESCENT for a timeout landing) and
+    # any provisional landing record should be retracted by the app.
+    RESUMED = "RESUMED"
 
 
 @dataclass
@@ -83,6 +87,12 @@ class Flight:
     descent_b: float | None = None       # ballistic constant fitted at landing
     burst_t: float | None = None         # sonde time at burst detection (epoch s)
     landed_alt: float | None = None      # altitude when LANDED was declared (stable re-ascent anchor)
+    # True when LANDED came from the silence sweep rather than telemetry
+    # reaching the ground band: a *provisional* landing. Silence while low is
+    # usually a landing, but sometimes just a reception gap - frames heard
+    # later, well below the declared landing altitude, reopen the descent
+    # (see _is_still_descending).
+    landed_by_timeout: bool = False
     # State at a silence close-out (EXPIRED mid-air), None for real landings.
     # If the sonde transmits again the silence was reception loss, not the
     # flight ending - _resolve_flight resumes this state instead of letting
@@ -96,6 +106,7 @@ class Flight:
     neg_rate_count: int = 0
     glitch_count: int = 0                # consecutive teleport-gated frames
     reascent_count: int = 0              # consecutive climbing frames since LANDED (serial-reuse gate)
+    redescent_count: int = 0             # consecutive frames below a timeout landing (resume gate)
     float_since_t: float | None = None
     last_track: tuple[float, float, float, float] | None = None  # (t, lat, lon, alt) last point kept
     profile: FlightProfile = field(default_factory=FlightProfile)
@@ -292,6 +303,10 @@ class FlightTracker:
             if low:
                 flight.state = FlightState.LANDED
                 flight.landed_alt = flight.last_alt
+                # Provisional: the silence is usually touchdown cutting the
+                # link, but can be a mere reception gap - frames heard later,
+                # clearly below this altitude, reopen the descent.
+                flight.landed_by_timeout = True
                 self._finalize_descent_b(flight)
                 self._persist(flight, profile=True)
                 out.append((flight, TrackerEvent.LANDED))
@@ -390,7 +405,27 @@ class FlightTracker:
                 flight.state = flight.expired_state
                 flight.expired_state = None
                 flight.reascent_count = 0
-                return flight, []
+                return flight, [TrackerEvent.RESUMED]
+            if (flight.state == FlightState.LANDED and flight.landed_by_timeout
+                    and self._is_still_descending(flight, frame)):
+                # A timeout landing contradicted by live frames well below the
+                # declared landing altitude: the silence was a reception gap
+                # and the sonde is still falling. Reopen the descent so it
+                # predicts again and the *real* landing supersedes the
+                # provisional record (which the app retracts on this event).
+                log.info("%s heard %.0f m below its timeout landing at %.0f m;"
+                         " resuming DESCENT", flight.serial,
+                         (flight.landed_alt or 0.0) - frame.alt,
+                         flight.landed_alt or 0.0)
+                flight.state = FlightState.DESCENT
+                flight.landed_by_timeout = False
+                flight.landed_alt = None
+                flight.redescent_count = 0
+                flight.reascent_count = 0
+                # the close-out fit was premature - refit at the real landing
+                # with the full descent's samples
+                flight.descent_b = None
+                return flight, [TrackerEvent.RESUMED]
             if flight.state != FlightState.LANDED or not self._is_new_ascent(flight, frame):
                 return flight, []
         # new flight (first sighting, or a fresh ascent for a reused serial)
@@ -422,6 +457,23 @@ class FlightTracker:
             return False
         landed.reascent_count += 1
         return landed.reascent_count >= tcfg.new_ascent_consecutive
+
+    def _is_still_descending(self, landed: Flight, frame: Frame) -> bool:
+        """A timeout-LANDED flight's serial is transmitting again: is the sonde
+        still falling (the silence was a reception gap, not touchdown), or is
+        this the landed sonde pinging from the ground?
+
+        Mirror image of :meth:`_is_new_ascent`: anchored to the altitude at
+        the landing declaration, and requiring a *sustained* run of fixes well
+        below it - ground GPS fixes are noisy (spikes of 100s of m), so a
+        single low fix must not reopen a real landing."""
+        tcfg = self.cfg.tracker
+        anchor = landed.landed_alt if landed.landed_alt is not None else landed.last_alt
+        if anchor is None or frame.alt >= anchor - tcfg.redescent_drop_m:
+            landed.redescent_count = 0
+            return False
+        landed.redescent_count += 1
+        return landed.redescent_count >= tcfg.redescent_consecutive
 
     def _new_flight(self, frame: Frame) -> Flight:
         lday = launch_day_of(frame.dt)

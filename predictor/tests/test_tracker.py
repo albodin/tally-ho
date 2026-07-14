@@ -249,6 +249,87 @@ def test_timeout_marks_landed():
     assert flight.state == FlightState.LANDED
 
 
+def _timeout_landed_flight(tracker, cfg, serial):
+    """Drive a simulated flight into DESCENT, cut the frames while low, and let
+    the timeout sweep declare a (provisional) landing. Returns the flight and
+    the remaining, unfed frames of the real descent."""
+    f = simulate_flight(serial=serial, burst_alt=12000)
+    frames = [parse_frame(m) for m in f.frames]
+    seen_descent = False
+    for i, fr in enumerate(frames):
+        flight, _ = tracker.update(fr)
+        if flight.state == FlightState.DESCENT:
+            seen_descent = True
+        if seen_descent and fr.alt < 1500:
+            break
+    assert flight.state == FlightState.DESCENT
+    later = flight.last_seen + timedelta(
+        seconds=cfg.tracker.landed_timeout_seconds + 10)
+    assert tracker.check_timeouts(later) == [(flight, TrackerEvent.LANDED)]
+    assert flight.state == FlightState.LANDED
+    assert flight.landed_by_timeout
+    return flight, frames[i + 1:]
+
+
+def test_timeout_landing_reopens_when_sonde_still_falling():
+    # A DESCENT flight silent while low is declared LANDED by the timeout
+    # sweep - provisionally. When frames then arrive well BELOW the declared
+    # landing altitude, the silence was a reception gap and the sonde is still
+    # falling: the descent must reopen (RESUMED) and the real landing land the
+    # flight for real - not be swallowed by the LANDED husk (seen live:
+    # timeout-landed at 1134 m, later frames at 832 m changed nothing).
+    cfg = Config()
+    tracker = FlightTracker(cfg)
+    flight, rest = _timeout_landed_flight(tracker, cfg, "RELAND")
+    anchor = flight.landed_alt
+    assert anchor is not None
+
+    events = []
+    for fr in rest:
+        fl, evs = tracker.update(fr)
+        events.extend(evs)
+    assert TrackerEvent.RESUMED in events
+    assert TrackerEvent.NEW_FLIGHT not in events    # same flight, not a ghost
+    assert TrackerEvent.LANDED in events            # the real landing
+    assert fl.state == FlightState.LANDED
+    assert not fl.landed_by_timeout                 # telemetry-confirmed now
+    assert fl.landed_alt < anchor - cfg.tracker.redescent_drop_m
+    # the close-out fit was retracted and refit over the full descent
+    assert fl.descent_b == pytest.approx(5.5, rel=0.1)
+
+
+def test_timeout_landing_not_reopened_by_ground_noise():
+    # A genuinely landed sonde keeps pinging from the ground with noisy GPS
+    # fixes. Fixes near the landing altitude - including an isolated deep
+    # downward spike - must NOT reopen the descent; only a sustained run of
+    # clearly-lower fixes does (the still-falling case above).
+    cfg = Config()
+    tracker = FlightTracker(cfg)
+    flight, _ = _timeout_landed_flight(tracker, cfg, "GNDNOISE")
+    anchor, lat, lon = flight.landed_alt, flight.last_lat, flight.last_lon
+    t0 = flight.last_seen
+    drop = cfg.tracker.redescent_drop_m
+
+    def ping(alt, secs):
+        dt = t0 + timedelta(seconds=secs)
+        return Frame(serial="GNDNOISE", lat=lat, lon=lon, alt=alt,
+                     t=dt.timestamp(), dt=dt, frame=int(secs), type="RS41")
+
+    pings = [
+        ping(anchor - 30, 30),               # inside the noise band
+        ping(anchor + 20, 60),
+        ping(anchor - drop - 200, 90),       # one wild low fix...
+        ping(anchor - drop - 250, 120),      # ...even two in a row...
+        ping(anchor - 10, 150),              # ...not sustained → must not count
+        ping(anchor - 40, 180),
+    ]
+    for f in pings:
+        fl, events = tracker.update(f)
+        assert TrackerEvent.RESUMED not in events
+        assert fl.state == FlightState.LANDED
+    assert fl.landed_by_timeout                     # still just provisional
+
+
 def test_descent_lost_above_ground_band_expires():
     # A descending sonde dropping below the radio horizon while still well
     # above the ground band must not linger as "active" for hours: after the

@@ -80,6 +80,24 @@ class TrackerConfig:
     # from the ground for hours with noisy GPS fixes; one (or two) high fixes must
     # not resurrect it into a ghost ASCENT flight - a real relaunch keeps climbing.
     new_ascent_consecutive: int = 3
+    # A timeout landing is provisional - silence while low is usually touchdown
+    # cutting the link, but sometimes just a reception gap. Frames heard later
+    # at least this far BELOW the declared landing altitude...
+    redescent_drop_m: float = 150.0
+    # ...for this many consecutive frames mean the sonde is still falling:
+    # DESCENT reopens and the real landing supersedes the provisional one.
+    # Sustained for the same reason as new_ascent_consecutive - noisy ground
+    # fixes must not reopen a real landing.
+    redescent_consecutive: int = 3
+    # A timeout-landed sonde still pinging is reporting better landing truth
+    # than the fix recorded at the close-out (the last frame heard BEFORE the
+    # silence, possibly hundreds of metres short). Refresh the recorded
+    # landing once a later fix moves this far horizontally, or this much
+    # lower, from the recorded one - thresholds sized above ordinary ground
+    # GPS wander so noise doesn't churn the row. (Used by the app; refinement
+    # never re-alerts.)
+    landing_refine_move_m: float = 50.0
+    landing_refine_alt_m: float = 30.0
     # Flown-track breadcrumb capture (the actual path, launch → now, for the map).
     # A frame is appended to the track once it has moved enough since the last
     # kept point - downsamples the dense telemetry so the stored trail stays small.

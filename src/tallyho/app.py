@@ -19,6 +19,7 @@ from .backfill import HistoryFetcher, merge_history
 from .config import Config
 from windfall.dem import ReloadableGround, download_dem_tiles
 from .geofence import build_capture_roi, in_capture_roi
+from windfall.geo import haversine_km
 from windfall.gfs import download_gfs_cycle
 from windfall.hrrr import download_hrrr_cycle, make_wind_source
 from .ingest import SondeHubStream, TelemetryProcessor
@@ -167,9 +168,23 @@ class App:
             if len(buf) < 5000:   # a fetch is seconds; cap a stuck worker's cost
                 buf.append(frame)
 
+        if TrackerEvent.RESUMED in events:
+            # A silence close-out contradicted by live frames - the sonde is
+            # still flying. Retract the provisional landing truth + LANDED
+            # alert rows so the real landing re-records and re-alerts at the
+            # corrected position (no-op for a resumed EXPIRED flight, which
+            # never recorded either).
+            self.store.retract_landing(flight.serial, flight.launch_day)
+
         if TrackerEvent.LANDED in events:
             self._record_landing(flight, now=flight.last_seen, detected_by="telemetry")
             self.alerts.handle_landed(flight, self._subscribers, now=flight.last_seen)
+            return
+
+        if flight.state == FlightState.LANDED and flight.landed_by_timeout:
+            # Late ground pings on a timeout-landed flight: keep the recorded
+            # landing (and the map's marker) on the freshest fix.
+            self._refine_timeout_landing(flight)
             return
 
         if flight.state == FlightState.DESCENT:
@@ -389,6 +404,37 @@ class App:
             serial=flight.serial, launch_day=flight.launch_day,
             land_lat=flight.last_lat, land_lon=flight.last_lon,
             land_alt=flight.last_alt, landed_at=now, detected_by=detected_by,
+        )
+
+    def _refine_timeout_landing(self, flight) -> None:
+        """A timeout-landed sonde still pinging from the ground is reporting
+        better landing truth than the fix recorded at the close-out (the last
+        frame heard BEFORE the silence, possibly hundreds of metres short).
+        Refresh the truth row once the fix meaningfully improves on it: enough
+        horizontal movement, or clearly lower. No re-alert - a refinement is
+        the same landing, better located (only a RESUMED flight's re-landing
+        re-alerts). Telemetry landings are left alone: their fix is already on
+        the ground, and ground noise must not walk a confirmed landing around."""
+        if flight.last_lat is None or flight.last_lon is None:
+            return
+        lnd = self.store.get_landing(flight.serial, flight.launch_day)
+        if lnd is None:    # e.g. the min-fall truth guard refused this flight
+            return
+        tcfg = self.cfg.tracker
+        moved_m = haversine_km(lnd["land_lat"], lnd["land_lon"],
+                               flight.last_lat, flight.last_lon) * 1000.0
+        lower = (lnd["land_alt"] is not None and flight.last_alt is not None
+                 and lnd["land_alt"] - flight.last_alt >= tcfg.landing_refine_alt_m)
+        if moved_m < tcfg.landing_refine_move_m and not lower:
+            return
+        # keep the original landing time - the position is refined, but the
+        # sonde came down when it came down, not when this ping arrived
+        landed_at = (datetime.fromisoformat(lnd["landed_at"])
+                     if lnd["landed_at"] else flight.last_seen)
+        self.store.record_landing(
+            serial=flight.serial, launch_day=flight.launch_day,
+            land_lat=flight.last_lat, land_lon=flight.last_lon,
+            land_alt=flight.last_alt, landed_at=landed_at, detected_by="timeout",
         )
 
     # ---- health -----------------------------------------------

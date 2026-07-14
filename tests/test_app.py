@@ -6,7 +6,7 @@ import pytest
 
 from tallyho.app import App
 from tallyho.config import Config
-from tallyho.models import AlertType, Subscriber
+from tallyho.models import AlertType, FlightState, Subscriber
 from tallyho.notify import FakeNtfySink
 from tallyho.store import Store
 from windfall.telemetry import parse_frame
@@ -333,6 +333,89 @@ def test_landing_recorded_on_timeout(store):
     app.tick(now=descent_frames[-1].dt + timedelta(seconds=10_000))
     lnd = store.get_landing("TOUT1", day)
     assert lnd is not None and lnd["detected_by"] == "timeout"
+
+
+def test_timeout_landing_retracted_when_sonde_still_falling(store):
+    # A timeout landing is provisional. When frames then arrive well below the
+    # declared landing altitude (the silence was a reception gap), the
+    # provisional truth row and LANDED alert are retracted, the descent
+    # resumes, and the real landing re-records and re-alerts at the corrected
+    # position (regression: the LANDED husk used to swallow the late frames).
+    f = simulate_flight(serial="RELAND1", burst_alt=20000)
+    app, sink = _app_with_sub(store, f.land_lat, f.land_lon, radius=40.0)
+    app.cfg.ingest.backfill_enabled = False
+    frames = [parse_frame(m) for m in f.frames]
+    for i, fr in enumerate(frames):
+        app.process_frame(fr)
+        fl = app.tracker.get("RELAND1")
+        if fl is not None and fl.state == FlightState.DESCENT and fr.alt < 1000:
+            break
+    day = fr.dt.date()
+    app.tick(now=fr.dt + timedelta(seconds=app.cfg.tracker.landed_timeout_seconds + 60))
+    lnd = store.get_landing("RELAND1", day)
+    assert lnd is not None and lnd["detected_by"] == "timeout"
+    assert sum("LANDED" in m.title for m in sink.sent) == 1
+
+    # reception returns: the sonde is still falling - feed the real descent tail
+    app.on_frames(frames[i + 1:])
+    lnd2 = store.get_landing("RELAND1", day)
+    assert lnd2 is not None and lnd2["detected_by"] == "telemetry"
+    assert lnd2["land_alt"] < lnd["land_alt"]
+    # the stale LANDED alert row was retracted, so the corrected one re-sent
+    assert sum("LANDED" in m.title for m in sink.sent) == 2
+
+
+def test_timeout_landing_refined_by_late_ground_pings(store):
+    # A timeout-landed sonde keeps pinging from the ground; those fixes are
+    # better landing truth than the last frame heard before the silence. Fixes
+    # that meaningfully move (or drop) refresh the recorded landing - without
+    # reopening the flight or re-alerting. Fixes within GPS wander change nothing.
+    from windfall.models import Frame
+
+    f = simulate_flight(serial="REFINE1", burst_alt=20000)
+    app, sink = _app_with_sub(store, f.land_lat, f.land_lon, radius=40.0)
+    app.cfg.ingest.backfill_enabled = False
+    frames = [parse_frame(m) for m in f.frames]
+    for fr in frames:
+        app.process_frame(fr)
+        fl = app.tracker.get("REFINE1")
+        if fl is not None and fl.state == FlightState.DESCENT and fr.alt < 1000:
+            break
+    day = fr.dt.date()
+    app.tick(now=fr.dt + timedelta(seconds=app.cfg.tracker.landed_timeout_seconds + 60))
+    lnd = store.get_landing("REFINE1", day)
+    assert lnd is not None and lnd["detected_by"] == "timeout"
+
+    lat, lon, t0 = fl.last_lat, fl.last_lon, fl.last_seen
+    move = app.cfg.tracker.landing_refine_move_m
+    drop = app.cfg.tracker.landing_refine_alt_m
+
+    def ping(alt, secs, dlat=0.0):
+        dt = t0 + timedelta(seconds=secs)
+        return Frame(serial="REFINE1", lat=lat + dlat, lon=lon, alt=alt,
+                     t=dt.timestamp(), dt=dt, frame=int(secs), type="RS41")
+
+    # within GPS wander of the recorded fix: the row must not churn
+    app.process_frame(ping(lnd["land_alt"] - drop / 2, 30))
+    assert store.get_landing("REFINE1", day) == lnd
+
+    # clearly lower (still inside the redescent noise band → no resume):
+    # the recorded landing follows the fresher fix
+    app.process_frame(ping(lnd["land_alt"] - drop - 20, 60))
+    lnd2 = store.get_landing("REFINE1", day)
+    assert lnd2["land_alt"] == pytest.approx(lnd["land_alt"] - drop - 20)
+    assert lnd2["landed_at"] == lnd["landed_at"]   # same landing, better fix
+    assert lnd2["detected_by"] == "timeout"
+
+    # moved horizontally past the threshold: position refreshes too
+    dlat = (move * 3) / 111_000.0
+    app.process_frame(ping(lnd2["land_alt"], 90, dlat=dlat))
+    lnd3 = store.get_landing("REFINE1", day)
+    assert lnd3["land_lat"] == pytest.approx(lat + dlat)
+
+    # still the same LANDED flight (no ghost, no resume), and no extra alert
+    assert app.tracker.get("REFINE1").state == FlightState.LANDED
+    assert sum("LANDED" in m.title for m in sink.sent) == 1
 
 
 def test_predict_active_predicts_ascending_sonde(store):
