@@ -32,6 +32,41 @@ def test_radius_scale_for_target_coverage():
     assert f"{TARGET_COVERAGE * 100:.0f}%" in m.report()
 
 
+def test_conditional_calibration_and_reliability():
+    """Coverage + r-scale broken out per alt bucket and per source, plus
+    the reliability curve (empirical coverage at radius × scale)."""
+    import pytest
+    from windfall.replay import PredRecord, ReplayResult
+
+    res = ReplayResult(serial="C", truth_lat=45.0, truth_lon=7.0)
+
+    def add(alt, err, rad, src):
+        res.records.append(PredRecord(
+            alt_at_pred=alt, error_km=err, uncertainty_km=rad,
+            sim_seconds=600.0, source=src, inside_radius=err <= rad))
+
+    # GFS at high altitude: heavily over-covered (ratio 0.2, radius 5x too big)
+    for _ in range(20):
+        add(25000.0, 1.0, 5.0, "gfs")
+    # measured at low altitude: under-covered (ratio 2.0, radius half what it needs)
+    for _ in range(20):
+        add(1000.0, 2.0, 1.0, "measured")
+
+    m = aggregate([res])
+    gfs_cov, gfs_rsc, gfs_n = m.source_calibration["gfs"]
+    meas_cov, meas_rsc, meas_n = m.source_calibration["measured"]
+    assert (gfs_cov, gfs_n) == (1.0, 20) and gfs_rsc == pytest.approx(0.2)
+    assert (meas_cov, meas_n) == (0.0, 20) and meas_rsc == pytest.approx(2.0)
+    assert m.bucket_calibration["20-99km"][0] == 1.0    # the gfs group, over-covered
+    assert m.bucket_calibration["0-2km"][0] == 0.0      # the measured group, under
+    r = m.reliability
+    assert r["x0.5"] <= r["x1"] <= r["x1.5"] <= r["x2"]  # monotonic
+    assert r["x1"] == pytest.approx(0.5)                 # gfs inside, measured outside
+    assert r["x2"] == pytest.approx(1.0)                 # both inside once doubled
+    rep = m.report()
+    assert "calibration by wind source" in rep and "reliability" in rep
+
+
 def test_replay_truth_override_scores_against_recovered_position():
     f = simulate_flight(serial="T1", burst_alt=24000)
     cfg = fast_ensemble_cfg()

@@ -32,7 +32,7 @@ from .config import Config, IntegratorConfig
 from .descent import DescentModel
 from .geo import haversine_km, normalize_lon
 from .integrator import WindFn, integrate_ascent, integrate_descent
-from .profile import FlightProfile
+from .profile import FlightProfile, WindResidualStats
 
 GroundFn = "Callable[[float, float], float]"
 
@@ -60,6 +60,7 @@ def _ar1_wind(
     rng: random.Random,
     cfg: Config,
     measured_range: tuple[float, float] | None,
+    stats: "WindResidualStats | None" = None,
 ) -> WindFn:
     """Wrap a wind source with one member's wind-error draw.
 
@@ -78,9 +79,24 @@ def _ar1_wind(
     descent legs so the column error is consistent within a member.
     """
     ecfg = cfg.ensemble
-    corr_l = max(ecfg.wind_corr_length_m, 1.0)
-    bias_u = rng.gauss(0.0, ecfg.wind_bias_sigma_mps)
-    bias_v = rng.gauss(0.0, ecfg.wind_bias_sigma_mps)
+    # When this flight's ascent measured-minus-model residual is available,
+    # size the spread from it rather than the global constants (calm day → tight
+    # ensemble, high-disagreement day → wide). Perturbations stay zero-mean, so
+    # this is a calibration fix (honest radius) and does not move the point.
+    if stats is not None:
+        floor = ecfg.wind_stats_sigma_floor_mps
+        cap = ecfg.wind_stats_sigma_cap_mps
+        sigma_meas = min(max(stats.sigma_mps, floor), cap)
+        sigma_extrap = min(max(ecfg.wind_stats_extrap_k * stats.sigma_mps, floor), cap)
+        bias_sigma = min(max(stats.bias_pc_mps, floor), cap)
+        corr_l = max(stats.corr_len_m, 1.0)
+    else:
+        sigma_meas = ecfg.wind_sigma_measured_mps
+        sigma_extrap = ecfg.wind_sigma_extrapolated_mps
+        bias_sigma = ecfg.wind_bias_sigma_mps
+        corr_l = max(ecfg.wind_corr_length_m, 1.0)
+    bias_u = rng.gauss(0.0, bias_sigma)
+    bias_v = rng.gauss(0.0, bias_sigma)
     state = {"alt": None, "eu": 0.0, "ev": 0.0}
 
     def wind(lat: float, lon: float, alt: float, sim_t: float):
@@ -90,9 +106,9 @@ def _ar1_wind(
         if base is None:
             base = profile.wind(alt)
         sigma = (
-            ecfg.wind_sigma_measured_mps
+            sigma_meas
             if measured_range is not None and measured_range[0] <= alt < measured_range[1]
-            else ecfg.wind_sigma_extrapolated_mps
+            else sigma_extrap
         )
         last = state["alt"]
         if last is None:
@@ -174,11 +190,13 @@ def ensemble_descent(
     rng: random.Random,
     n: int | None = None,
     measured_range: tuple[float, float] | None = None,
+    stats: WindResidualStats | None = None,
 ) -> EnsembleLanding | None:
     """Monte Carlo descent: perturb B and the winds, land every member.
 
     ``measured_range`` is the altitude span actually measured from this flight
     (None when the column is all GFS/modelled) - wind noise is tighter inside it.
+    ``stats`` sizes the wind spread from this flight's ascent residual.
     """
     n = n if n is not None else cfg.ensemble.n_members
     mem_cfg = _member_cfg(cfg)
@@ -189,7 +207,7 @@ def ensemble_descent(
             lat=lat, lon=lon, alt=alt, t0=t0, profile=profile,
             descent=_perturbed_model(descent, rel, rng, cfg),
             ground_fn=ground_fn, cfg=mem_cfg,
-            wind_fn=_ar1_wind(wind_fn, profile, rng, cfg, measured_range),
+            wind_fn=_ar1_wind(wind_fn, profile, rng, cfg, measured_range, stats),
         )
         if member.ok:
             landings.append((member.lat, member.lon, member.eta))
@@ -212,6 +230,7 @@ def ensemble_preburst(
     rng: random.Random,
     n: int | None = None,
     measured_range: tuple[float, float] | None = None,
+    stats: WindResidualStats | None = None,
 ) -> EnsembleLanding | None:
     """Monte Carlo pre-burst: perturb burst altitude, ascent rate, the assumed
     chute B, and the winds; fly every member up then down."""
@@ -221,7 +240,7 @@ def ensemble_preburst(
     base_model = DescentModel(b=default_b, residual_mps=0.0, n_points=0)
     landings: list[tuple[float, float, datetime]] = []
     for _ in range(n):
-        member_wind = _ar1_wind(wind_fn, profile, rng, cfg, measured_range)
+        member_wind = _ar1_wind(wind_fn, profile, rng, cfg, measured_range, stats)
         rate_k = max(0.5, ascent_rate * math.exp(rng.gauss(0.0, ecfg.ascent_rate_sigma_rel)))
         burst_k = max(alt + 100.0, burst_alt + rng.gauss(0.0, ecfg.burst_alt_sigma_m))
         b_lat, b_lon, t_asc = integrate_ascent(

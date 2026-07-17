@@ -122,6 +122,7 @@
 # post-change samples only.
 # regime_change_rel = 0.25
 # regime_recent_points = 12
+# prior_strength = 6.0             # pseudo-count weight of the climatology B prior
 
 [integrator]
 # dt_seconds = 1.0                 # Heun (midpoint-averaged) step
@@ -139,6 +140,11 @@
 # wind_sigma_extrapolated_mps = 3.0
 # wind_corr_length_m = 1500.0      # vertical correlation of the wind error
 # wind_bias_sigma_mps = 1.5        # per-member constant offset (shared model bias)
+# wind_stats_enabled = true        # size wind spread from this flight's ascent residual
+# wind_stats_min_bins = 8          # residual samples needed to trust the per-flight stats
+# wind_stats_extrap_k = 1.5        # extrapolated-column error vs measured residual
+# wind_stats_sigma_floor_mps = 0.5 # never claim a tighter wind error than this
+# wind_stats_sigma_cap_mps = 15.0
 # b_sigma_rel_fit = 0.05           # relative B spread floor for a real fit
 # b_sigma_rel_shortcut = 0.18      # ...for the single-point shortcut
 # b_sigma_rel_preburst = 0.30      # ...for the assumed pre-burst chute
@@ -147,6 +153,8 @@
 # quantile = 0.68                  # radius = this quantile of the member spread
 # Fixed RNG seed for reproducible runs; omit for stable per-flight seeding.
 # seed = 12345
+# vectorized = true                # batch-across-members descent + pre-burst ensembles (faster; set false for the scalar reference)
+# gfs_shared_column = true         # sample the GFS column once per step at the member centroid (fast; false = exact per-bucket)
 
 [uncertainty]                      # heuristic fallback when the ensemble is off
 # base_km = 0.3                    # calibration knobs - tune via replay/backtest

@@ -515,7 +515,7 @@ class FlightTracker:
         # DESCENT the falling payload is itself a wind measurement - newer and
         # closer to the landing zone than the ascent column - so (when enabled)
         # it keeps refreshing the bins it re-crosses, with the stale contents
-        # down-weighted (plan Phase 2 live refresh).
+        # down-weighted (live refresh).
         pcfg = self.cfg.profile
         descending = flight.state == FlightState.DESCENT
         if flight.prev_frame is not None and (

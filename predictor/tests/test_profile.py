@@ -1,6 +1,7 @@
 """Tests for wind/density profile construction & sampling."""
 
 import math
+import random
 
 import pytest
 
@@ -161,6 +162,45 @@ def test_build_ascent_profile_recovers_wind(flight):
         assert v == pytest.approx(tv, abs=1.5)
 
 
+def test_wind_residual_stats_recovers_injected_error():
+    """The ascent measured-minus-model residual should recover a known
+    injected bias, de-biased scatter, and a plausible correlation length."""
+    from windfall.profile import wind_residual_stats
+
+    p = FlightProfile(bin_size_m=150.0)
+    rng = random.Random(0)
+    for a in range(0, 30000, 150):
+        # measured = model (5, 2) + known bias (3, -2) + small correlated noise
+        p.add_sample(a + 75, 5.0 + 3.0 + rng.gauss(0, 1.0),
+                     2.0 - 2.0 + rng.gauss(0, 1.0),
+                     lat=45.0, lon=7.0, t=1000.0 + a)
+    stats = wind_residual_stats(p, lambda la, lo, alt, t: (5.0, 2.0),
+                                t0_epoch=1000.0, min_bins=8)
+    assert stats is not None
+    assert stats.bias_u == pytest.approx(3.0, abs=0.4)
+    assert stats.bias_v == pytest.approx(-2.0, abs=0.4)
+    assert stats.sigma_mps == pytest.approx(1.0, abs=0.4)
+    assert stats.bias_pc_mps == pytest.approx(math.hypot(3.0, 2.0) / math.sqrt(2), abs=0.4)
+    assert 200.0 <= stats.corr_len_m <= 6000.0
+    assert stats.n_bins >= 8
+
+
+def test_wind_residual_stats_none_paths():
+    """Too few bins, no model sample, or bins without position → None (caller
+    keeps the global ensemble constants)."""
+    from windfall.profile import wind_residual_stats
+
+    p = FlightProfile(bin_size_m=150.0)
+    for a in range(0, 600, 150):   # only 4 bins, below min_bins=8
+        p.add_sample(a + 75, 5.0, 2.0, lat=45.0, lon=7.0, t=1000.0 + a)
+    assert wind_residual_stats(p, lambda *a: (5.0, 2.0), min_bins=8) is None
+    # model returns None everywhere → no residual samples
+    p2 = FlightProfile(bin_size_m=150.0)
+    for a in range(0, 3000, 150):
+        p2.add_sample(a + 75, 5.0, 2.0, lat=45.0, lon=7.0, t=1000.0 + a)
+    assert wind_residual_stats(p2, lambda *a: None, min_bins=8) is None
+
+
 def test_outlier_segment_rejected():
     cfg = ProfileConfig(max_horizontal_mps=200)
     p = FlightProfile(bin_size_m=150.0)
@@ -175,3 +215,80 @@ def test_outlier_segment_rejected():
     added = update_profile_from_pair(p, a, b, cfg)
     assert added is False
     assert p.is_empty()
+
+
+def test_blended_wind_fn_batch_matches_scalar():
+    """The batched blend (.batch) equals the per-member blend across the
+    range / AGL-floor / gap / distance-age-weight branches."""
+    import numpy as np
+    from windfall.config import ProfileConfig
+    from windfall.profile import blended_wind_fn
+
+    p = FlightProfile(150.0)
+    for a in range(0, 20000, 150):
+        p.add_sample(a + 75, 10.0 + a * 0.001, 3.0, lat=45.0, lon=7.0, t=1000.0 + a)
+
+    class MockField:
+        def __call__(self, lat, lon, alt, t):
+            return (20.0, -5.0)
+
+        def batch(self, lats, lons, alts, t):
+            return np.full(len(alts), 20.0), np.full(len(alts), -5.0)
+
+    cfg = ProfileConfig()
+    wind = blended_wind_fn(p, MockField(), cfg, t0_epoch=1000.0,
+                           ground_fn=lambda lat, lon: 0.0)
+    rng = np.random.default_rng(1)
+    lats = 44.5 + rng.random(60)
+    lons = 6.5 + rng.random(60)
+    alts = rng.random(60) * 22000.0
+    for sim_t in (0.0, 600.0):
+        bu, bv = wind.batch(lats, lons, alts, sim_t)
+        for i in range(len(lats)):
+            su, sv = wind(float(lats[i]), float(lons[i]), float(alts[i]), sim_t)
+            assert bu[i] == pytest.approx(su, abs=1e-3)
+            assert bv[i] == pytest.approx(sv, abs=1e-3)
+
+
+def test_blended_wind_fn_batch_shared_close_to_scalar():
+    """shared=True takes the fine-grid fast path (centroid GFS
+    column, 10 m row snapping, equirectangular distance). Away from range/hole
+    boundaries it must track the scalar blend to well under the ensemble's
+    wind-noise floor (sigma >= 0.5 m/s)."""
+    import numpy as np
+    from windfall.config import ProfileConfig
+    from windfall.profile import blended_wind_fn
+
+    p = FlightProfile(150.0)
+    for a in range(0, 20000, 150):
+        p.add_sample(a + 75, 10.0 + a * 0.001, 3.0, lat=45.0, lon=7.0, t=1000.0 + a)
+
+    class MockField:
+        # no .batch: the blend samples the field per member either way, so any
+        # shared-vs-scalar difference is the fast weight path alone
+        def __call__(self, lat, lon, alt, t):
+            return (20.0, -5.0)
+
+    cfg = ProfileConfig()
+    wind = blended_wind_fn(p, MockField(), cfg, t0_epoch=1000.0,
+                           ground_fn=lambda lat, lon: 0.0)
+    rng = np.random.default_rng(3)
+    lats = 44.5 + rng.random(60)
+    lons = 6.5 + rng.random(60)
+    alts = rng.random(60) * 22000.0
+    lo, hi = p.alt_range()
+    # the fast path quantises altitude to 10 m rows; stay clear of the range
+    # edges where that legitimately flips the blend on/off
+    away = (np.abs(alts - lo) > 15.0) & (np.abs(alts - hi) > 15.0)
+    for sim_t in (0.0, 600.0):
+        bu, bv = wind.batch(lats, lons, alts, sim_t, shared=True)
+        for i in np.nonzero(away)[0]:
+            su, sv = wind(float(lats[i]), float(lons[i]), float(alts[i]), sim_t)
+            assert bu[i] == pytest.approx(su, abs=0.1)
+            assert bv[i] == pytest.approx(sv, abs=0.1)
+    # caller-supplied ground elevations replace the per-member ground_fn loop
+    # without changing the result
+    bu1, bv1 = wind.batch(lats, lons, alts, 0.0, shared=True)
+    bu2, bv2 = wind.batch(lats, lons, alts, 0.0, shared=True, grounds=np.zeros(60))
+    assert np.allclose(bu1, bu2, atol=1e-12)
+    assert np.allclose(bv1, bv2, atol=1e-12)

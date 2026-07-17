@@ -142,14 +142,14 @@ class ProfileConfig:
     gfs_blend_distance_km: float = 60.0   # e-folding horizontal distance of trust
     gfs_blend_age_s: float = 5400.0       # e-folding age of trust (1.5 h)
     # Below this height above ground the measured column is ignored outright in
-    # favour of model winds (plan Phase 2): boundary-layer winds at the landing
+    # favour of model winds: boundary-layer winds at the landing
     # zone are terrain-local, and the launch-site measurement misleads there.
     # Only active when a ground model and a 4-D model field are both wired.
     gfs_blend_min_agl_m: float = 3000.0
     # An interior altitude gap in the measured profile wider than this (e.g. a
     # reception dropout) is filled from GFS instead of lerping across it.
     interior_gap_fill_m: float = 600.0
-    # How the measured column corrects the model field (plan Phase 2):
+    # How the measured column corrects the model field:
     #   "blend" - replace: wind = w·measured + (1-w)·model (w decays with
     #             distance/age). Simple, strong where the model is biased AND
     #             the trajectory stays near the ascent column.
@@ -158,7 +158,7 @@ class ProfileConfig:
     #             spatial structure; the measurement only shifts it.
     # Both share the decay constants and the AGL floor below; ablate to choose.
     correction_mode: str = "blend"
-    # Live refresh (plan Phase 2): descent telemetry is itself a wind
+    # Live refresh: descent telemetry is itself a wind
     # measurement - closer to the landing zone and newer than the ascent column.
     # When enabled, descent frame pairs keep updating the profile bins they
     # re-cross, with the old bin contents down-weighted so the fresher, nearer
@@ -184,6 +184,13 @@ class DescentConfig:
     # more than this relative jump, the fit resets to post-change samples only.
     regime_change_rel: float = 0.25
     regime_recent_points: int = 12        # window defining "recent" for the test
+    # Shrink the fitted ballistic constant toward the per-family climatology
+    # prior (the median B of past flights of this sonde family) as pseudo-counts:
+    # B* = (prior_strength·μ0 + n_points·B̂) / (prior_strength + n_points). Just
+    # after burst the fit rests on a handful of noisy points, so the learned
+    # prior dominates; deep into the descent the fit's own points win. 0 disables
+    # (pure live fit). No effect without a climatology prior for the family.
+    prior_strength: float = 6.0
 
 
 @dataclass(slots=True)
@@ -218,6 +225,18 @@ class EnsembleConfig:
     # published radii cover only 52% instead of 68% on the full-corpus backtest
     # (2026-06-10). Calibration knob: tune against `windfall backtest`.
     wind_bias_sigma_mps: float = 1.5
+    # Size the wind spread from THIS flight's ascent measured-minus-model
+    # residual instead of the three global sigmas above, whenever a measured
+    # column and a model field are both present. The residual Δ(z) = measured −
+    # model is a free, same-day measurement of the forecast error for this exact
+    # flight; a calm well-forecast day then gets a tight ensemble and a
+    # high-disagreement day a wide one - per-flight, not corpus-average. Falls
+    # back to the constants below the bin count / when no model field exists.
+    wind_stats_enabled: bool = True
+    wind_stats_min_bins: int = 8          # residual samples needed to trust it
+    wind_stats_extrap_k: float = 1.5      # extrapolated-column error vs measured residual
+    wind_stats_sigma_floor_mps: float = 0.5   # never claim better than this
+    wind_stats_sigma_cap_mps: float = 15.0
     b_sigma_rel_fit: float = 0.05         # relative B spread floor for a real fit
     b_sigma_rel_shortcut: float = 0.18    # ...for the single-point shortcut
     b_sigma_rel_preburst: float = 0.30    # ...for the assumed pre-burst chute
@@ -225,6 +244,22 @@ class EnsembleConfig:
     ascent_rate_sigma_rel: float = 0.10   # pre-burst: ascent-rate spread
     quantile: float = 0.68                # radius = this quantile of member spread
     seed: int | None = None               # fixed RNG seed (None → stable per flight)
+    # Run the descent AND pre-burst ensembles through the vectorised
+    # (batch-across-members) integrators (windfall.ensemble_vec). Statistically
+    # equivalent to the scalar ensembles but NOT bit-identical (the RNG draw
+    # order differs). Corpus-validated: descent 2026-07-14 (mean final error
+    # 0.255 vs 0.267 km, calibration 76.3% vs 76.6%, per-flight landings within
+    # a Monte-Carlo ~45 m median), pre-burst 2026-07-16 (see the CHANGELOG
+    # entry). Set False to fall back to the scalar reference.
+    vectorized: bool = True
+    # With the vectorised ensemble on a GFS/blend field: sample the model column
+    # once per step at the member centroid and share it across all members,
+    # instead of once per ~5 km position bucket. The dropped horizontal variation
+    # across the member cloud (~10 km vs the 0.25°/~28 km GFS grid) is far
+    # smaller than the wind noise the ensemble adds on purpose, and this is what
+    # makes the GFS path as fast as the measured one. Set False for the exact
+    # per-bucket sampling (the A/B reference).
+    gfs_shared_column: bool = True
 
 
 @dataclass(slots=True)
@@ -262,7 +297,7 @@ class PredictConfig:
     # topmost (boundary-layer) wind clamped over 30 km of column - errors of
     # 100+ km published with a straight face. No path beats a junk path.
     preburst_min_coverage: float = 0.7
-    # Ablation switch (plan Phase 5): when False the measured ascent column is
+    # Ablation switch: when False the measured ascent column is
     # ignored entirely and predictions run on model (GFS) winds alone - the
     # baseline that tells you what the ascent correction actually buys.
     use_measured_winds: bool = True
@@ -324,8 +359,8 @@ class GFSConfig:
 class HRRRConfig:
     """HRRR - NOAA's 3 km CONUS model, hourly cycles. Far better boundary-layer
     and terrain-flow winds than GFS where it exists; its pressure-level files
-    top out near 50 hPa (~20-21 km), so GFS still covers the column above
-    (plan Phase 0). When both sources are enabled the predictor samples HRRR
+    top out near 50 hPa (~20-21 km), so GFS still covers the column above.
+    When both sources are enabled the predictor samples HRRR
     below the ceiling and GFS above, with a linear blend across the seam."""
 
     path: str = "hrrr"                    # cache of downloaded HRRR GRIB

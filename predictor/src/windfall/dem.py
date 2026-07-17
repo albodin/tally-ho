@@ -13,7 +13,7 @@ implementations:
   global) 1°x1° tiles, resolved by their global naming scheme.
 * :class:`IndexedDEM` - bilinear lookups into *any* geographic-CRS GeoTIFF
   tile set, indexed by each file's bounds: drop USGS **3DEP** 1/3-arc-second
-  (10 m) tiles in the directory for the plan's Wasatch-grade terrain, or mix
+  (10 m) tiles in the directory for Wasatch-grade terrain, or mix
   resolutions - the finest tile covering the point wins.
 
 rasterio dataset handles are not thread-safe, so reads are lock-guarded and
@@ -185,7 +185,7 @@ class CopernicusDEM:
 class IndexedDEM:
     """Bounds-indexed bilinear lookups into an arbitrary GeoTIFF tile set.
 
-    Built for USGS 3DEP 1/3-arc-second (10 m) 1°x1° tiles - the plan's pick
+    Built for USGS 3DEP 1/3-arc-second (10 m) 1°x1° tiles - a good pick
     for Wasatch terrain - but accepts any geographic-CRS rasters: the directory
     is scanned once, each file's bounds recorded, and a lookup opens (and
     caches) the finest-resolution tile covering the point. Projected-CRS files

@@ -420,13 +420,20 @@ def test_ensemble_refresh_throttled_per_flight(monkeypatch):
     import windfall.predictor as predmod
 
     calls = {"n": 0}
-    real = predmod.ensemble_descent
+    real_scalar = predmod.ensemble_descent
+    real_vec = predmod.ensemble_descent_vec
 
-    def counting(**kw):
+    def counting_scalar(**kw):
         calls["n"] += 1
-        return real(**kw)
+        return real_scalar(**kw)
 
-    monkeypatch.setattr(predmod, "ensemble_descent", counting)
+    def counting_vec(**kw):
+        calls["n"] += 1
+        return real_vec(**kw)
+
+    # count whichever implementation ensemble.vectorized selects
+    monkeypatch.setattr(predmod, "ensemble_descent", counting_scalar)
+    monkeypatch.setattr(predmod, "ensemble_descent_vec", counting_vec)
     cfg = Config()
     cfg.ensemble.n_members = 8
     predictor = Predictor(cfg, gfs_source=StaticGFSSource(_gfs_profile()))
@@ -591,3 +598,59 @@ def test_prune_grib_cache(tmp_path):
 
     assert prune_grib_cache(tmp_path, keep_hours=0.0, now=now) == 0   # disabled
     assert new_grib.exists()
+
+
+def test_cube_pair_batch_matches_call():
+    """CubePairWind.batch equals per-member __call__ over the same points
+    (the batched GFS wind eval must be bit-for-bit the scalar path)."""
+    import numpy as np
+    from datetime import timedelta
+    from windfall.gfs import CubePairWind
+    a = _cube(T0, [30.0, 20.0, 10.0], u_east=[30.0, 20.0, 20.0])
+    b = _cube(T0 + timedelta(hours=3), [30.0, 20.0, 16.0], u_east=[32.0, 22.0, 26.0])
+    pair = CubePairWind(a, b, t0=T0)
+    rng = np.random.default_rng(0)
+    lats = 44.0 + rng.random(50) * 2.0
+    lons = 6.0 + rng.random(50) * 2.0
+    alts = 500.0 + rng.random(50) * 10000.0
+    for sim_t in (0.0, 5400.0):
+        bu, bv = pair.batch(lats, lons, alts, sim_t)
+        for i in range(len(lats)):
+            su, sv = pair(float(lats[i]), float(lons[i]), float(alts[i]), sim_t)
+            assert bu[i] == pytest.approx(su, abs=1e-9)
+            assert bv[i] == pytest.approx(sv, abs=1e-9)
+
+
+def test_cube_pair_batch_shared_column():
+    """shared=True samples ONE column at the member centroid and
+    hands it to every member - each member must get exactly the centroid
+    column's wind at its own altitude, and co-located members must match the
+    exact per-bucket path bit-for-bit."""
+    import numpy as np
+    from datetime import timedelta
+    from windfall.gfs import CubePairWind
+    a = _cube(T0, [30.0, 20.0, 10.0], u_east=[30.0, 20.0, 20.0])
+    b = _cube(T0 + timedelta(hours=3), [30.0, 20.0, 16.0], u_east=[32.0, 22.0, 26.0])
+    pair = CubePairWind(a, b, t0=T0)
+    rng = np.random.default_rng(2)
+    lats = 44.95 + rng.random(40) * 0.1          # ~10 km member cloud
+    lons = 6.95 + rng.random(40) * 0.1
+    alts = 500.0 + rng.random(40) * 10000.0
+    # the centroid exactly as batch_c computes it (wrap-aware lon mean)
+    lat0 = float(np.add.reduce(lats)) / lats.size
+    d = (lons - lons[0] + 180.0) % 360.0 - 180.0
+    lon0 = lons[0] + float(np.add.reduce(d)) / d.size
+    for sim_t in (0.0, 5400.0):
+        su, sv = pair.batch(lats, lons, alts, sim_t, shared=True)
+        for i in range(len(alts)):
+            cu, cv = pair(lat0, lon0, float(alts[i]), sim_t)
+            assert su[i] == pytest.approx(cu, abs=1e-9)
+            assert sv[i] == pytest.approx(cv, abs=1e-9)
+    # co-located members: shared and exact per-bucket sampling coincide
+    same_lat = np.full(20, 45.3)
+    same_lon = np.full(20, 7.2)
+    aa = 500.0 + rng.random(20) * 10000.0
+    eu, ev = pair.batch(same_lat, same_lon, aa, 0.0)
+    su, sv = pair.batch(same_lat, same_lon, aa, 0.0, shared=True)
+    assert np.allclose(eu, su, atol=1e-12)
+    assert np.allclose(ev, sv, atol=1e-12)

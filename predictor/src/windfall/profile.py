@@ -16,11 +16,14 @@ from __future__ import annotations
 
 import bisect
 import math
+from dataclasses import dataclass
 from typing import Callable, Iterable
+
+import numpy as np
 
 from .atmosphere import isa_density, measured_density
 from .config import ProfileConfig
-from .geo import haversine_km, normalize_lon
+from .geo import _R_KM, haversine_km, normalize_lon
 from .kinematics import segment
 from .models import Frame, WindBin
 
@@ -64,7 +67,7 @@ class FlightProfile:
 
         ``weight_cap`` bounds the *effective* weight of what the bin already
         holds: the existing average counts as at most that many samples, so a
-        stream of fresh samples (live descent refresh, plan Phase 2) quickly
+        stream of fresh samples (live descent refresh) quickly
         dominates a stale ascent average instead of drowning in its count."""
         idx = self._idx(alt)
         b = self._bins.get(idx)
@@ -236,6 +239,88 @@ class FlightProfile:
         return p
 
 
+@dataclass(slots=True)
+class WindResidualStats:
+    """Per-flight forecast error, measured from the ascent measured-minus-model
+    residual Δ(z) = measured − model at each sampled bin's own place/time.
+
+    This is a free, same-day, same-airmass measurement of how wrong the model
+    winds are for *this* flight - the ensemble sizes its wind spread from it
+    instead of a corpus-average constant, so a calm well-forecast day gets
+    a tight radius and a high-disagreement day a wide one."""
+
+    n_bins: int
+    sigma_mps: float        # de-biased per-component RMS residual (random error)
+    bias_u: float           # mean Δu (systematic eastward error), m/s
+    bias_v: float           # mean Δv (systematic northward error), m/s
+    bias_pc_mps: float      # per-component RMS of the bias vector
+    corr_len_m: float       # vertical correlation length of the residual
+
+
+def wind_residual_stats(
+    profile: FlightProfile,
+    field: WindFieldFn,
+    t0_epoch: float | None = None,
+    min_bins: int = 8,
+    default_corr_len_m: float = 1500.0,
+) -> WindResidualStats | None:
+    """Measured-minus-model wind statistics over the sampled ascent column.
+
+    Samples the model ``field`` at each measured bin's own (lat, lon, alt, t) and
+    reduces the residual to a bias, a de-biased scatter, and a vertical
+    correlation length. Returns None when fewer than ``min_bins`` bins carry both
+    a measured vector and a model sample (then the caller keeps the global
+    ensemble constants)."""
+    items: list[tuple[float, float, float]] = []
+    for idx in sorted(profile._bins):
+        b = profile._bins[idx]
+        if b.lat is None or b.lon is None:
+            continue
+        sim_t = (b.t - t0_epoch) if (t0_epoch is not None and b.t is not None) else 0.0
+        m = field(b.lat, b.lon, b.alt, sim_t)
+        if m is None:
+            continue
+        items.append((b.alt, b.u - m[0], b.v - m[1]))
+    n = len(items)
+    if n < min_bins:
+        return None
+    du = [x[1] for x in items]
+    dv = [x[2] for x in items]
+    bias_u = sum(du) / n
+    bias_v = sum(dv) / n
+    ru = [x - bias_u for x in du]
+    rv = [x - bias_v for x in dv]
+    var = sum(a * a + c * c for a, c in zip(ru, rv)) / (2 * n)
+    sigma = math.sqrt(max(var, 0.0))
+    bias_pc = math.sqrt((bias_u * bias_u + bias_v * bias_v) / 2.0)
+    # vertical correlation length from the lag-1 autocorrelation of the
+    # altitude-sorted residual series (dalt = median bin spacing)
+    corr_len = default_corr_len_m
+    if n >= 3 and sigma > 1e-6:
+        num = sum(ru[i] * ru[i + 1] + rv[i] * rv[i + 1] for i in range(n - 1))
+        den = sum(ru[i] * ru[i] + rv[i] * rv[i] for i in range(n - 1))
+        if den > 0:
+            lag1 = num / den
+            alts = [x[0] for x in items]
+            dalts = sorted(alts[i + 1] - alts[i] for i in range(n - 1))
+            dalt = dalts[len(dalts) // 2]
+            if 0.05 < lag1 < 0.995 and dalt > 0:
+                corr_len = min(6000.0, max(200.0, -dalt / math.log(lag1)))
+    return WindResidualStats(n_bins=n, sigma_mps=sigma, bias_u=bias_u, bias_v=bias_v,
+                             bias_pc_mps=bias_pc, corr_len_m=corr_len)
+
+
+def _haversine_np(lat1, lon1, lat2, lon2):
+    """Vectorised great-circle distance (km), matching :func:`geo.haversine_km`
+    (same ``_lon_delta`` wrap and earth radius)."""
+    p1 = np.radians(lat1)
+    p2 = np.radians(lat2)
+    dphi = np.radians(lat2 - lat1)
+    dlam = np.radians((lon2 - lon1 + 180.0) % 360.0 - 180.0)
+    a = np.sin(dphi / 2.0) ** 2 + np.cos(p1) * np.cos(p2) * np.sin(dlam / 2.0) ** 2
+    return 2.0 * _R_KM * np.arcsin(np.minimum(1.0, np.sqrt(a)))
+
+
 def blended_wind_fn(
     profile: FlightProfile,
     gfs_fn: WindFieldFn,
@@ -282,6 +367,169 @@ def blended_wind_fn(
         gu, gv = g
         return (w * mu + (1.0 - w) * gu, w * mv + (1.0 - w) * gv)
 
+    # ---- batched twin of wind() for the vectorised ensemble (GFS path) ----
+    # Same result as calling wind() per member; the branches become masks, and
+    # the (u, v) pairs ride ONE complex array (u + jv) - at ensemble sizes the
+    # cost is numpy call dispatch, not flops, and complex halves the calls.
+    # Prereqs (measured column on a grid, sampled-bin arrays) are built lazily on
+    # the first .batch call, so the scalar path pays nothing.
+    _prep: dict = {}
+    gfs_batch = getattr(gfs_fn, "batch", None)
+    gfs_batch_c = getattr(gfs_fn, "batch_c", None)
+
+    def _prepare() -> dict:
+        if _prep:
+            return _prep
+        top = (rng[1] if rng is not None else 32_000.0) + 20.0
+        mg = np.arange(0.0, top, 10.0)
+        mc = np.empty(mg.size, dtype=np.complex128)
+        for i, z in enumerate(mg):
+            u, v = profile.wind(float(z))
+            mc[i] = complex(u, v)
+        idxs = profile._index()
+
+        def col(attr):
+            return np.array([
+                getattr(profile._bins[i], attr)
+                if getattr(profile._bins[i], attr) is not None else np.nan
+                for i in idxs], dtype=float) if idxs else np.zeros(0)
+
+        blat, blon, bt = col("lat"), col("lon"), col("t")
+        has_pos = ~(np.isnan(blat) | np.isnan(blon))
+        # NaN-free bin arrays: bins without a position get a dummy (masked via
+        # has_pos below); bins without a time get +inf so max(0, T - t) == 0 -
+        # exactly the scalar's "no age term".
+        blat = np.where(has_pos, blat, 0.0)
+        blon = np.where(has_pos, blon, 0.0)
+        bt = np.where(np.isnan(bt), np.inf, bt)
+        balt = (np.array([profile._bins[i].alt for i in idxs], dtype=float)
+                if idxs else np.zeros(0))
+        _prep.update(mg=mg, mc=mc, balt=balt, blat=blat, blon=blon, bt=bt,
+                     has_pos=has_pos, all_pos=bool(has_pos.all()))
+        if balt.size:
+            # Fine-grid tables for the shared fast path: everything that depends
+            # only on altitude (nearest bin, gap/range mask, bin place/time) is
+            # precomputed per 10 m row, so a step is an index plus gathers
+            # instead of searchsorted + argmin arithmetic. Quantising member
+            # altitude to the row centre moves hole/range boundaries by <= 5 m -
+            # noise against the 150 m bins, and the exact (shared=False) path
+            # keeps the un-quantised logic.
+            pos = np.minimum(np.searchsorted(balt, mg), balt.size - 1)
+            posm = np.maximum(pos - 1, 0)
+            near = np.where(np.abs(balt[posm] - mg) < np.abs(balt[pos] - mg), posm, pos)
+            _prep.update(
+                ok_g=((mg >= rng[0]) & (mg < rng[1])
+                      & (np.abs(balt[near] - mg) <= cfg.interior_gap_fill_m)),
+                brad_g=np.radians(blat)[near], blon_g=blon[near],
+                cosb_g=np.cos(np.radians(blat))[near], bt_g=bt[near],
+                has_pos_g=has_pos[near],
+            )
+        return _prep
+
+    def batch_c(lats, lons, alts, sim_t: float = 0.0, shared: bool = False,
+                grounds=None):
+        # shared=True: sample the GFS column once at the member
+        # centroid instead of per ~5 km bucket - see CubePairWind.batch_c - and
+        # take the fine-grid fast path below. Only the model sampling is shared;
+        # the blend weight stays per-member (each member's distance/age to the
+        # ascent bin genuinely differs). ``grounds`` (optional, per-member
+        # elevations the caller already has) replaces the per-member ground_fn
+        # loop for the AGL floor; the exact path ignores it and re-queries, so
+        # shared=False stays bit-comparable to the scalar.
+        lats = np.asarray(lats, dtype=float)
+        lons = np.asarray(lons, dtype=float)
+        alts = np.asarray(alts, dtype=float)
+        n = alts.shape[0]
+        if gfs_batch_c is not None:
+            gc = gfs_batch_c(lats, lons, alts, sim_t, shared=shared)
+        elif gfs_batch is not None:
+            gu, gv = (gfs_batch(lats, lons, alts, sim_t, shared=True) if shared
+                      else gfs_batch(lats, lons, alts, sim_t))
+            gc = gu + 1j * gv
+        else:
+            gc = np.empty(n, dtype=np.complex128)
+            for i in range(n):
+                g = gfs_fn(float(lats[i]), float(lons[i]), float(alts[i]), sim_t)
+                if g is None:
+                    g = profile.wind(float(alts[i]))
+                gc[i] = complex(g[0], g[1])
+        if rng is None:
+            return gc
+        c = _prepare()
+        if c["balt"].size == 0:
+            return gc
+        min_agl = cfg.gfs_blend_min_agl_m
+
+        if shared:
+            # ---- fast path: per-member work is an index, gathers, and the
+            # weight arithmetic; no searchsorted, no ground_fn loop ----
+            gi = (alts * 0.1 + 0.5).astype(np.intp)
+            np.minimum(gi, c["mg"].size - 1, out=gi)
+            np.maximum(gi, 0, out=gi)
+            blend_ok = c["ok_g"][gi]
+            if not blend_ok.any():
+                return gc
+            if grounds is not None:
+                if min_agl > 0.0:
+                    blend_ok = blend_ok & ((alts - grounds) >= min_agl)
+            elif ground_fn is not None and min_agl > 0.0:
+                low = blend_ok & (alts < 9_000.0 + min_agl)
+                if low.any():
+                    grd = np.zeros(n)
+                    for i in np.nonzero(low)[0]:
+                        grd[i] = ground_fn(float(lats[i]), float(lons[i]))
+                    blend_ok &= ~(low & ((alts - grd) < min_agl))
+            # equirectangular distance: error <1% even at 100 km, invisible
+            # through exp(-d/60km); the exact path keeps true haversine
+            p1 = np.radians(lats)
+            dphi = c["brad_g"][gi] - p1
+            dlam = np.radians((lons - c["blon_g"][gi] + 180.0) % 360.0 - 180.0)
+            arg = np.sqrt(dphi * dphi + (c["cosb_g"][gi] * dlam) ** 2) * (_R_KM / d0)
+            if not c["all_pos"]:
+                arg = np.where(c["has_pos_g"][gi], arg, 0.0)
+            if t0_epoch is not None:
+                arg += np.maximum(0.0, (t0_epoch + sim_t) - c["bt_g"][gi]) * (1.0 / a0)
+            np.negative(arg, out=arg)
+            w = np.exp(arg, out=arg)
+            # measured wind snapped to the member's 10 m row (<= 5 m of the
+            # true altitude, an order below the 150 m bins feeding the column)
+            mcw = c["mc"][gi]
+            return np.where(blend_ok, w * mcw + (1.0 - w) * gc, gc)
+
+        balt = c["balt"]
+        blend_ok = (alts >= rng[0]) & (alts < rng[1])
+        if not blend_ok.any():
+            return gc
+        # AGL floor: only members within min_agl of any Earth terrain can trip it
+        if ground_fn is not None and min_agl > 0.0:
+            low = blend_ok & (alts < 9_000.0 + min_agl)
+            if low.any():
+                grd = np.zeros(n)
+                for i in np.nonzero(low)[0]:
+                    grd[i] = ground_fn(float(lats[i]), float(lons[i]))
+                blend_ok &= ~(low & ((alts - grd) < min_agl))
+        # nearest sampled bin by altitude (== scalar bin_near); wide alt gap = hole
+        pos = np.clip(np.searchsorted(balt, alts), 0, balt.size - 1)
+        posm = np.clip(pos - 1, 0, balt.size - 1)
+        nearest = np.where(np.abs(balt[posm] - alts) < np.abs(balt[pos] - alts), posm, pos)
+        blend_ok &= np.abs(balt[nearest] - alts) <= cfg.interior_gap_fill_m
+        # weight = exp(-(distance/d0 + age/a0)) from the sampled bin's place/time
+        arg = _haversine_np(lats, lons, c["blat"][nearest], c["blon"][nearest]) * (1.0 / d0)
+        if not c["all_pos"]:
+            arg = np.where(c["has_pos"][nearest], arg, 0.0)
+        if t0_epoch is not None:
+            arg += np.maximum(0.0, (t0_epoch + sim_t) - c["bt"][nearest]) * (1.0 / a0)
+        w = np.exp(-arg)
+        mcw = np.interp(alts, c["mg"], c["mc"])
+        return np.where(blend_ok, w * mcw + (1.0 - w) * gc, gc)
+
+    def batch(lats, lons, alts, sim_t: float = 0.0, shared: bool = False,
+              grounds=None):
+        out = batch_c(lats, lons, alts, sim_t, shared=shared, grounds=grounds)
+        return out.real, out.imag
+
+    wind.batch = batch
+    wind.batch_c = batch_c
     return wind
 
 
@@ -338,7 +586,7 @@ def bias_corrected_wind_fn(
     t0_epoch: float | None = None,
     ground_fn: Callable[[float, float], float] | None = None,
 ) -> WindFieldFn:
-    """The plan-Phase-2 bias formulation: ``wind = model + w·(measured - model
+    """The bias formulation: ``wind = model + w·(measured - model
     at the place/time the layer was sampled)``.
 
     Unlike :func:`blended_wind_fn` (which *replaces* model wind with the

@@ -102,3 +102,40 @@ def test_radius_scale_multiplies_published_radius():
     scaled = uncertainty_radius_km(sim_seconds=1800, measured_fraction=0.5,
                                    fit_residual_mps=1.0, cfg=cfg)
     assert scaled == pytest.approx(base * 1.39, abs=0.01)
+
+
+def test_shrink_b_toward_climatology_prior():
+    """The fitted B shrinks toward the per-family climatology prior as
+    pseudo-counts - prior-dominated when few points, fit-dominated when many,
+    and a no-op without a prior / with prior_strength 0."""
+    from datetime import date
+
+    from windfall.descent import DescentModel
+    from windfall.predictor import Predictor
+    from windfall.tracker import Flight
+
+    class StubClim:
+        def __init__(self, b):
+            self._b = b
+
+        def descent_b(self, sonde_type):
+            return self._b
+
+    flight = Flight(serial="S1", launch_day=date(2026, 7, 14), type="RS41")
+    cfg = Config()
+    cfg.descent.prior_strength = 6.0
+    p = Predictor(cfg, climatology=StubClim(8.0))
+
+    # few points → prior dominates: (6*8 + 4*5)/(6+4) = 6.8
+    few = p._shrink_b(DescentModel(b=5.0, residual_mps=0.3, n_points=4), flight)
+    assert few.b == pytest.approx(6.8)
+    # many points → fit dominates
+    many = p._shrink_b(DescentModel(b=5.0, residual_mps=0.3, n_points=100), flight)
+    assert many.b == pytest.approx((6 * 8 + 100 * 5) / 106)
+    # no climatology / prior_strength 0 / no prior for family → unchanged
+    m = DescentModel(b=5.0, residual_mps=0.3, n_points=4)
+    assert Predictor(cfg)._shrink_b(m, flight).b == 5.0
+    cfg0 = Config()
+    cfg0.descent.prior_strength = 0.0
+    assert Predictor(cfg0, climatology=StubClim(8.0))._shrink_b(m, flight).b == 5.0
+    assert Predictor(cfg, climatology=StubClim(None))._shrink_b(m, flight).b == 5.0

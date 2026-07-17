@@ -24,3 +24,7 @@ secrets.env
 *.db
 *.db-wal
 *.db-shm
+
+# local dev artifacts
+benchmarks/
+docs/

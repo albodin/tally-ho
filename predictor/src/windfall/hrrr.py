@@ -1,4 +1,4 @@
-"""HRRR wind source + HRRR-over-GFS composition (plan Phase 0).
+"""HRRR wind source + HRRR-over-GFS composition.
 
 HRRR is NOAA's 3 km CONUS model, cycled hourly - dramatically better
 boundary-layer and terrain-flow winds than GFS's 0.25° where it exists. Its
@@ -302,7 +302,7 @@ def blend_fields(primary, fallback, ceiling_m: float, ramp_m: float):
 
 
 class CompositeWindSource(GFSWindSource):
-    """HRRR below the ceiling, GFS above - one source, plan Phase 0.
+    """HRRR below the ceiling, GFS above - one source.
 
     Degrades per-call: if either side has no data for the prediction time, the
     other serves the whole column (HRRR alone clamps above its top level -

@@ -1,5 +1,5 @@
-"""Tests for the plan-Phase-2 live descent refresh, the wind-assembly ablation
-switches, and the ablation runner itself (plan Phase 5)."""
+"""Tests for the live descent refresh, the wind-assembly ablation
+switches, and the ablation runner itself."""
 
 import json
 
@@ -109,7 +109,7 @@ def test_blend_forces_model_winds_below_agl_floor():
     assert without_ground(45.0, 7.0, 1500.0, 0.0)[0] == pytest.approx(10.0, abs=0.5)
 
 
-# ---- bias-correction wind mode (plan Phase 2 formulation) --------------------
+# ---- bias-correction wind mode ----------------------------------------------
 
 def test_bias_corrected_wind_fn_shifts_model_by_measured_delta():
     from windfall.profile import bias_corrected_wind_fn

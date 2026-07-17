@@ -78,7 +78,7 @@ def test_shortcut():
 
 
 def test_regime_change_resets_to_new_chute():
-    """Chute character changes mid-fall (plan Phase 1): the fit must jump to
+    """Chute character changes mid-fall: the fit must jump to
     the new regime, not average the two - and the old MAD gate must not reject
     the still-minority fresh samples (the cut runs first)."""
     from windfall.config import DescentConfig

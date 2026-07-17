@@ -80,7 +80,7 @@ def fit_descent(
 
     b_i = v * np.sqrt(rho)            # per-point ballistic constant
 
-    # Regime change (plan Phase 1): the descent sometimes changes character
+    # Regime change: the descent sometimes changes character
     # mid-fall - balloon remnants detach, or the chute finally inflates around
     # 5-10 km where the air thickens. When the recent per-point constants step
     # away from the older ones, reset: keep only post-change samples, so the
@@ -116,7 +116,7 @@ def fit_descent(
 def _regime_change_start(b_i: np.ndarray, cfg: DescentConfig) -> int:
     """Index of the first sample of the *current* regime, or 0 when the
     series is consistent. Recent window vs the rest, then walk back from the
-    end to find where the new regime began (plan Phase 1 failure mode)."""
+    end to find where the new regime began."""
     k = max(cfg.min_fit_points, cfg.regime_recent_points)
     if cfg.regime_change_rel <= 0 or len(b_i) < 2 * k:
         return 0

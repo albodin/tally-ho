@@ -1,4 +1,4 @@
-"""Tests for the HRRR source's pure pieces (plan Phase 0): the Lambert
+"""Tests for the HRRR source's pure pieces: the Lambert
 projection, projected-grid WindCube sampling, HRRR-over-GFS composition, and
 the wind-source factory. GRIB reading itself needs cfgrib + real files and is
 exercised in deployment, like the GFS reader."""

@@ -23,6 +23,7 @@ Layers:
 
 from __future__ import annotations
 
+import bisect
 import copy
 import logging
 import math
@@ -457,6 +458,25 @@ def assemble_cube(
     )
 
 
+def _interp_sorted(x: float, xs: list, ys: list) -> float:
+    """Linear interpolation of ``ys`` at ``x`` over ascending ``xs``, clamped at
+    the ends. Pure-python scalar path: for one query against a short (~30-level)
+    column this is ~3x faster than ``np.interp`` (whose cost here is the
+    Python->C call boundary, not the arithmetic) - and this runs twice per
+    integrator step, per ensemble member."""
+    if x <= xs[0]:
+        return ys[0]
+    if x >= xs[-1]:
+        return ys[-1]
+    i = bisect.bisect_right(xs, x)
+    x0 = xs[i - 1]
+    x1 = xs[i]
+    if x1 == x0:
+        return ys[i - 1]
+    t = (x - x0) / (x1 - x0)
+    return ys[i - 1] + t * (ys[i] - ys[i - 1])
+
+
 class CubePairWind:
     """Time-interpolating 4-D wind field between two forecast valid times.
 
@@ -483,7 +503,8 @@ class CubePairWind:
         self._ta = a.valid_time.timestamp()
         span = b.valid_time.timestamp() - self._ta
         self._span = span if span > 0 else None
-        self._cols: dict[tuple, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+        self._cols: dict[tuple, tuple[list, list, list]] = {}
+        self._cols_c: dict[tuple, tuple[np.ndarray, np.ndarray]] = {}
 
     def _w(self, sim_t: float) -> float:
         if self._span is None:
@@ -498,13 +519,17 @@ class CubePairWind:
             ha, ua, va = self.a.column_arrays(lat, lon)
             w = self._w(sim_t)
             if w <= 0.0:
-                col = (ha, ua, va)
+                arrs = (ha, ua, va)
             else:
                 hb, ub, vb = self.b.column_arrays(lat, lon)
                 if hb.shape != ha.shape:
-                    col = (hb, ub, vb) if w >= 0.5 else (ha, ua, va)
+                    arrs = (hb, ub, vb) if w >= 0.5 else (ha, ua, va)
                 else:
-                    col = (ha + w * (hb - ha), ua + w * (ub - ua), va + w * (vb - va))
+                    arrs = (ha + w * (hb - ha), ua + w * (ub - ua), va + w * (vb - va))
+            # Store the blended column as python lists: the per-step query is a
+            # scalar bisect+lerp (_interp_sorted), far cheaper than np.interp's
+            # call overhead. The one-time tolist() amortises over the bucket's hits.
+            col = (arrs[0].tolist(), arrs[1].tolist(), arrs[2].tolist())
             # FIFO-evict rather than clear(): a full clear mid-integration makes
             # every subsequent step a 16-corner recompute at once
             while len(self._cols) >= self._CACHE_MAX:
@@ -514,7 +539,80 @@ class CubePairWind:
 
     def __call__(self, lat: float, lon: float, alt: float, sim_t: float = 0.0):
         h, u, v = self._column(lat, lon, sim_t)
-        return (float(np.interp(alt, h, u)), float(np.interp(alt, h, v)))
+        return (_interp_sorted(alt, h, u), _interp_sorted(alt, h, v))
+
+    def _column_c(self, lat: float, lon: float, sim_t: float):
+        """:meth:`_column` as ``(heights, u + jv)`` ndarrays for the batch path:
+        one complex np.interp serves both components, and the cached lists
+        aren't re-converted on every call."""
+        key = (round(lat * self._Q_INV_DEG), round(lon * self._Q_INV_DEG),
+               int((self._t0 + sim_t) // self._Q_SECONDS))
+        col = self._cols_c.get(key)
+        if col is None:
+            h, u, v = self._column(lat, lon, sim_t)
+            col = (np.asarray(h), np.asarray(u) + 1j * np.asarray(v))
+            while len(self._cols_c) >= self._CACHE_MAX:
+                self._cols_c.pop(next(iter(self._cols_c)))
+            self._cols_c[key] = col
+        return col
+
+    def batch_c(self, lats: np.ndarray, lons: np.ndarray, alts: np.ndarray,
+                sim_t: float = 0.0, shared: bool = False,
+                grounds: np.ndarray | None = None) -> np.ndarray:
+        """Vectorised :meth:`__call__` over member arrays, returned as one
+        complex ``u + jv`` array. At ensemble sizes the cost is
+        numpy call dispatch, not flops - the complex form halves the calls, and
+        the blend's batch keeps the pairing through its own arithmetic.
+
+        Default (``shared=False``): groups members by the same ~5 km column
+        bucket - few, because ensemble members cluster - computes each column
+        once (reusing the scalar cache), and batch-interpolates. Bit-for-bit
+        the scalar per-member result: both take the bucket's first-computed
+        column and np.interp clamps like ``_interp_sorted``.
+
+        ``shared=True``: sample ONE column at the member centroid and give it
+        to every member - a single np.interp instead of one per bucket. An
+        approximation: it drops the horizontal wind variation *across the
+        member cloud* (~10 km against the 0.25°/~28 km grid), which is far
+        smaller than the wind noise a Monte-Carlo ensemble adds on purpose.
+        Callers that need per-position exactness keep the default."""
+        lats = np.asarray(lats, dtype=float)
+        lons = np.asarray(lons, dtype=float)
+        alts = np.asarray(alts, dtype=float)
+        if shared:
+            # np.add.reduce, not .mean(): the mean wrapper's dtype/axis logic is
+            # ~5x the reduction itself at member counts
+            lat0 = float(np.add.reduce(lats)) / lats.size
+            # wrap-aware longitude mean (members can straddle the antimeridian)
+            ref = float(lons[0])
+            d = (lons - ref + 180.0) % 360.0 - 180.0
+            lon0 = normalize_lon(ref + float(np.add.reduce(d)) / d.size)
+            h, wc = self._column_c(lat0, lon0, sim_t)
+            return np.interp(alts, h, wc)
+        n = alts.shape[0]
+        out = np.empty(n, dtype=np.complex128)
+        klat = np.round(lats * self._Q_INV_DEG).astype(np.int64)
+        klon = np.round(lons * self._Q_INV_DEG).astype(np.int64)
+        # one integer key per member (klon is bounded well under the multiplier),
+        # then group by unique bucket in C - no per-member Python loop
+        key = klat * 1_000_003 + klon
+        uniq, inv = np.unique(key, return_inverse=True)
+        for b in range(uniq.size):
+            idx = np.nonzero(inv == b)[0]
+            i0 = int(idx[0])
+            h, wc = self._column_c(float(lats[i0]), float(lons[i0]), sim_t)
+            out[idx] = np.interp(alts[idx], h, wc)
+        return out
+
+    def batch(self, lats: np.ndarray, lons: np.ndarray, alts: np.ndarray,
+              sim_t: float = 0.0, shared: bool = False,
+              grounds: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
+        """:meth:`batch_c` unpacked to a ``(u, v)`` array pair - the batch wind
+        protocol the vectorised ensemble consumes. ``grounds`` is part of that
+        protocol (the blend uses it for its AGL floor); a bare model field has
+        no floor, so it is accepted and ignored."""
+        wc = self.batch_c(lats, lons, alts, sim_t, shared=shared)
+        return wc.real, wc.imag
 
     def column_levels(self, lat: float, lon: float, sim_t: float = 0.0) -> list[GFSLevel]:
         cols_a = self.a.column(lat, lon)

@@ -282,6 +282,17 @@ class Metrics:
     # predictions fall inside it - the one-number calibration knob. ~1.0 means
     # the radii are honest; >1 under-confident radii, <1 over-confident.
     radius_scale_for_target: float = float("nan")
+    # Conditional calibration: (coverage, r-scale) per altitude bucket and per
+    # wind source, so a single global r-scale can't hide a regime that is badly
+    # over- or under-confident (the flat-looking overall number that motivated
+    # the per-flight wind stats).
+    bucket_calibration: dict[str, tuple[float, float]] = field(default_factory=dict)
+    source_calibration: dict[str, tuple[float, float, int]] = field(default_factory=dict)
+    # Reliability: empirical coverage when the published radius is scaled by
+    # each factor. A ~1σ (68%) radius should read ~0.68 at ×1.0 and grow with
+    # scale in the right shape; a cliff or a plateau means the radius shape (not
+    # just its size) is wrong.
+    reliability: dict[str, float] = field(default_factory=dict)
 
     def report(self) -> str:
         lines = [
@@ -294,21 +305,44 @@ class Metrics:
             "error by altitude-at-prediction:",
         ]
         for key in self.bucket_mean_error_km:
+            cov, rsc = self.bucket_calibration.get(key, (float("nan"), float("nan")))
             lines.append(
-                f"  {key:>12}: {self.bucket_mean_error_km[key]:.2f} km "
-                f"(n={self.bucket_counts[key]})"
+                f"  {key:>12}: {self.bucket_mean_error_km[key]:6.2f} km "
+                f"(n={self.bucket_counts[key]:>5})  cover {cov * 100:3.0f}%  "
+                f"r-scale {rsc:.2f}"
             )
+        if self.source_calibration:
+            lines.append("calibration by wind source:")
+            for src, (cov, rsc, n) in self.source_calibration.items():
+                lines.append(f"  {src:>12}: cover {cov * 100:3.0f}%  "
+                             f"r-scale {rsc:.2f}  (n={n})")
+        if self.reliability:
+            curve = "  ".join(f"{k}:{v * 100:.0f}%"
+                              for k, v in self.reliability.items())
+            lines.append(f"reliability (coverage at radius×scale): {curve}")
         return "\n".join(lines)
 
 
 # The published radius is meant to be a ~68% (1-sigma) bound.
 TARGET_COVERAGE = 0.68
+# Scale factors for the reliability curve.
+RELIABILITY_SCALES = (0.5, 1.0, 1.5, 2.0)
+
+
+def _calib(ratios: list[float]) -> tuple[float, float]:
+    """(coverage, r-scale-for-target) for one group of error/radius ratios."""
+    if not ratios:
+        return (float("nan"), float("nan"))
+    cover = sum(1 for x in ratios if x <= 1.0) / len(ratios)
+    return (cover, _coverage_scale(sorted(ratios), TARGET_COVERAGE))
 
 
 def aggregate(results: list[ReplayResult]) -> Metrics:
     """Aggregate per-flight replays into accuracy/calibration metrics."""
     finals = [r.final_error_km for r in results if r.final_error_km is not None]
     bucket_err: dict[str, list[float]] = {_bucket_key(b): [] for b in ALT_BUCKETS}
+    bucket_ratios: dict[str, list[float]] = {_bucket_key(b): [] for b in ALT_BUCKETS}
+    source_ratios: dict[str, list[float]] = {}
     inside = 0
     total = 0
     ratios: list[float] = []
@@ -316,9 +350,17 @@ def aggregate(results: list[ReplayResult]) -> Metrics:
         for rec in r.records:
             total += 1
             inside += int(rec.inside_radius)
-            bucket_err[_bucket_for(rec.alt_at_pred)].append(rec.error_km)
+            bkey = _bucket_for(rec.alt_at_pred)
+            bucket_err[bkey].append(rec.error_km)
             if rec.uncertainty_km > 0:
-                ratios.append(rec.error_km / rec.uncertainty_km)
+                ratio = rec.error_km / rec.uncertainty_km
+                ratios.append(ratio)
+                bucket_ratios[bkey].append(ratio)
+                source_ratios.setdefault(rec.source, []).append(ratio)
+    reliability = {
+        f"x{s:g}": (sum(1 for x in ratios if x <= s) / len(ratios) if ratios else float("nan"))
+        for s in RELIABILITY_SCALES
+    }
     return Metrics(
         n_flights=len(results),
         n_predictions=total,
@@ -329,6 +371,9 @@ def aggregate(results: list[ReplayResult]) -> Metrics:
         bucket_counts={k: len(v) for k, v in bucket_err.items()},
         calibration_rate=(inside / total) if total else float("nan"),
         radius_scale_for_target=_coverage_scale(ratios, TARGET_COVERAGE),
+        bucket_calibration={k: _calib(v) for k, v in bucket_ratios.items()},
+        source_calibration={k: (*_calib(v), len(v)) for k, v in source_ratios.items()},
+        reliability=reliability,
     )
 
 
@@ -404,7 +449,7 @@ def _bucket_for(alt: float) -> str:
     return _bucket_key(ALT_BUCKETS[-1])
 
 
-# ---- ablation (plan Phase 5) -----------------------------------------------
+# ---- ablation --------------------------------------------------------------
 # Run the same corpus once per wind-assembly variant so each component's
 # contribution is measured, not assumed. If a component buys nothing, drop it.
 
@@ -476,7 +521,7 @@ def run_ablation(
     jobs: int = 1,
     with_dem: bool = False,
 ) -> dict[str, AblationOutcome] | None:
-    """Backtest the corpus once per ablation mode (plan Phase 5).
+    """Backtest the corpus once per ablation mode.
 
     Each mode runs on a deep copy of ``cfg`` so the variants stay independent.
     ``gfs_factory`` builds the model wind source per mode (default: the GFS

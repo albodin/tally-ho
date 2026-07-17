@@ -11,8 +11,10 @@ build their fixtures from this module.
 from __future__ import annotations
 
 import math
+import random
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from typing import Callable
 
 from .atmosphere import R_D, isa_density
 from .models import EARTH_RADIUS_M
@@ -25,7 +27,7 @@ def wind_at(alt: float) -> tuple[float, float]:
     """A smooth synthetic wind field (u east, v north) in m/s.
 
     Eastward wind grows with altitude (a stylised jet) then eases; a mild,
-    steady northward component. Smooth in altitude, matching the plan's
+    steady northward component. Smooth in altitude, matching the predictor's
     assumption that the field is spatially smooth."""
     u = 8.0 + 22.0 * math.exp(-((alt - 11_000.0) / 7_000.0) ** 2)
     v = 4.0 + 0.0002 * alt
@@ -59,8 +61,25 @@ def simulate_flight(
     include_ptu: bool = True,       # emit pressure/temp (measured density path)
     start: datetime = BASE_TIME,
     stringify: bool = False,        # emit numbers as JSON strings (wire reality)
+    wind: "Callable[[float], tuple[float, float]] | None" = None,
+    alt_noise_m: float = 0.0,
+    noise_seed: int = 12345,
 ) -> SimResult:
-    """Generate a full ascent+descent flight and its true landing point."""
+    """Generate a full ascent+descent flight and its true landing point.
+
+    ``wind`` overrides the wind field ``(u, v)(alt)`` the flight is advected by
+    (default :func:`wind_at`). Passing a *different* field than the one a
+    predictor is later given is how the injected-model-error harness creates a
+    known, controllable forecast error offline (the corpus backtest's job when a
+    corpus exists).
+
+    ``alt_noise_m`` adds Gaussian noise to the *reported* GPS altitude only (the
+    physics and the true landing stay clean, and pressure/temp stay clean like a
+    real sonde's separate sensor). Real 1 Hz GPS altitude carries a few metres of
+    noise, which makes the just-after-burst descent-rate fit noisy - the regime
+    where the climatology-B prior helps."""
+    wind = wind if wind is not None else wind_at
+    noise_rng = random.Random(noise_seed)
     frames: list[dict] = []
     lat = math.radians(launch_lat)
     lon = math.radians(launch_lon)
@@ -87,7 +106,7 @@ def simulate_flight(
             "time_received": dt.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
             "lat": lat_d,
             "lon": lon_d,
-            "alt": alt,
+            "alt": alt + (noise_rng.gauss(0.0, alt_noise_m) if alt_noise_m > 0.0 else 0.0),
         }
         if include_ptu:
             msg["pressure"] = press_hpa
@@ -104,7 +123,7 @@ def simulate_flight(
         if t >= next_emit:
             emit()
             next_emit += frame_dt
-        u, v = wind_at(alt)
+        u, v = wind(alt)
         lat += (v / R) * sim_dt
         lon += (u / (R * math.cos(lat))) * sim_dt
         alt += ascent_rate * sim_dt
@@ -115,7 +134,7 @@ def simulate_flight(
 
     # --- descent ---
     while alt > ground_alt:
-        u, v = wind_at(alt)
+        u, v = wind(alt)
         rho = isa_density(alt)
         v_t = ballistic_b * rho ** -0.5
         lat += (v / R) * sim_dt

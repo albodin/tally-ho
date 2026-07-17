@@ -7,7 +7,7 @@ online fork - so tuning numbers transfer directly to production.
 
 Wind source selection:
 * measured ascent profile when present → ``source = measured``;
-* otherwise GFS, if a GFS wind source is wired (Phase 5) → ``source = gfs``;
+* otherwise GFS, if a GFS wind source is wired → ``source = gfs``;
 * GFS also fills above/below the measured range and wide interior gaps as an
   edge policy;
 * when the GFS source can serve a full 4-D field, the integrator samples it at
@@ -35,6 +35,7 @@ from .climatology import Climatology
 from .config import Config
 from .descent import DescentModel, fit_descent, shortcut_descent
 from .ensemble import ensemble_descent, ensemble_preburst
+from .ensemble_vec import ensemble_descent_vec, ensemble_preburst_vec
 from .geo import normalize_lon
 from .integrator import WindFn, integrate_ascent, integrate_descent
 from .models import FlightState, Prediction, PredictionSource
@@ -48,7 +49,7 @@ GroundFn = Callable[[float, float], float]
 
 
 class GFSWindSource:
-    """Interface for a GFS wind source (implemented in Phase 5, :mod:`windfall.gfs`)."""
+    """Interface for a GFS wind source (implemented in :mod:`windfall.gfs`)."""
 
     def profile_at(self, lat: float, lon: float, when: datetime) -> Optional[FlightProfile]:
         raise NotImplementedError
@@ -107,7 +108,8 @@ class Predictor:
         profile, source = self._wind_profile(flight, when)
         if profile is None:
             return None
-        wind_fn = self._wind_fn(flight, profile, source, when)
+        wind_fn, raw_field = self._wind_fn(flight, profile, source, when)
+        stats = self._residual_stats(flight, profile, source, raw_field)
 
         landing = integrate_descent(
             lat=flight.last_lat,
@@ -129,15 +131,18 @@ class Predictor:
         land_lat, land_lon = landing.lat, landing.lon
         radius: float | None = None
         if self._ensemble_on(self.cfg.ensemble.n_members):
+            ens_fn = (ensemble_descent_vec if self.cfg.ensemble.vectorized
+                      else ensemble_descent)
             off = self._ensemble_offset(
                 "descent", flight, landing.lat, landing.lon,
-                lambda rng: ensemble_descent(
+                lambda rng: ens_fn(
                     lat=flight.last_lat, lon=flight.last_lon, alt=flight.last_alt,
                     t0=when, profile=profile, descent=descent,
                     ground_fn=self.ground_fn, cfg=self.cfg,
                     wind_fn=wind_fn, rng=rng,
                     measured_range=(profile.alt_range()
                                     if source == PredictionSource.MEASURED else None),
+                    stats=stats,
                 ),
             )
             if off is not None:
@@ -194,7 +199,8 @@ class Predictor:
             if not self.cfg.predict.use_measured_winds or flight.profile.is_empty():
                 return None
             profile, source = flight.profile, PredictionSource.MEASURED
-        wind_fn = self._wind_fn(flight, profile, source, when)
+        wind_fn, raw_field = self._wind_fn(flight, profile, source, when)
+        stats = self._residual_stats(flight, profile, source, raw_field)
 
         site_burst = None
         default_b = self.cfg.descent.default_b
@@ -248,9 +254,11 @@ class Predictor:
         land_lat, land_lon = landing.lat, landing.lon
         radius: float | None = None
         if self._ensemble_on(self.cfg.ensemble.n_members_preburst):
+            pre_fn = (ensemble_preburst_vec if self.cfg.ensemble.vectorized
+                      else ensemble_preburst)
             off = self._ensemble_offset(
                 "preburst", flight, landing.lat, landing.lon,
-                lambda rng: ensemble_preburst(
+                lambda rng: pre_fn(
                     lat=flight.last_lat, lon=flight.last_lon, alt=flight.last_alt,
                     t0=when, burst_alt=burst_alt, ascent_rate=ascent_rate,
                     default_b=default_b, profile=profile,
@@ -258,6 +266,7 @@ class Predictor:
                     wind_fn=wind_fn, rng=rng,
                     measured_range=(profile.alt_range()
                                     if source == PredictionSource.MEASURED else None),
+                    stats=stats,
                 ),
             )
             if off is not None:
@@ -317,12 +326,30 @@ class Predictor:
     def _descent_model(self, flight: Flight) -> DescentModel | None:
         model = fit_descent(flight.descent_samples, self.cfg.descent,
                             burst_t=flight.burst_t, burst_alt=flight.burst_alt)
-        if model is not None:
-            return model
-        if flight.descent_samples:
+        if model is None:
+            if not flight.descent_samples:
+                return None
             last = flight.descent_samples[-1]
-            return shortcut_descent(last.v_obs, last.rho, self.cfg.descent)
-        return None
+            model = shortcut_descent(last.v_obs, last.rho, self.cfg.descent)
+        return self._shrink_b(model, flight)
+
+    def _shrink_b(self, model: DescentModel, flight: Flight) -> DescentModel:
+        """Shrink the fitted B toward the per-family climatology prior as
+        pseudo-counts, so the just-after-burst prediction (a handful of noisy
+        points) leans on the learned prior and the deep-descent fit stands on its
+        own. No-op without a climatology prior for this family, or when
+        ``prior_strength`` is 0."""
+        n0 = self.cfg.descent.prior_strength
+        if self.climatology is None or n0 <= 0.0:
+            return model
+        mu0 = self.climatology.descent_b(flight.type)
+        if mu0 is None:
+            return model
+        n_eff = max(0, model.n_points)
+        b = (n0 * mu0 + n_eff * model.b) / (n0 + n_eff)
+        b = min(max(b, self.cfg.descent.b_min), self.cfg.descent.b_max)
+        return DescentModel(b=b, residual_mps=model.residual_mps,
+                            n_points=model.n_points, clamped=model.clamped)
 
     def _wind_profile(
         self, flight: Flight, when: datetime | None
@@ -346,21 +373,43 @@ class Predictor:
         profile: FlightProfile,
         source: PredictionSource,
         when: datetime | None,
-    ) -> WindFn | None:
-        """The 4-D wind callable for the integrator, when one can be built."""
+    ) -> tuple[WindFn | None, WindFn | None]:
+        """The integrator's 4-D wind callable *and* the raw (unblended) model
+        field it was built from. The raw field is what :meth:`_residual_stats`
+        measures the ascent residual against; it is None when no model
+        source is wired."""
         if self.gfs_source is None or when is None:
-            return None
+            return None, None
         field = self.gfs_source.wind_field(flight.last_lat, flight.last_lon, when)
         if field is None:
-            return None
+            return None, None
         if source == PredictionSource.GFS:
-            return field
+            return field, field
         if not self.cfg.profile.gfs_blend_enabled:
-            return None
+            return None, field
         make = (bias_corrected_wind_fn if self.cfg.profile.correction_mode == "bias"
                 else blended_wind_fn)
         return make(profile, field, self.cfg.profile,
-                    t0_epoch=flight.last_t, ground_fn=self.ground_fn)
+                    t0_epoch=flight.last_t, ground_fn=self.ground_fn), field
+
+    def _residual_stats(
+        self,
+        flight: Flight,
+        profile: FlightProfile,
+        source: PredictionSource,
+        raw_field: WindFn | None,
+    ):
+        """Measure this flight's ascent measured-minus-model wind residual,
+        used to size the ensemble spread. Only meaningful for the measured path
+        with a model field to compare against; None otherwise (the ensemble then
+        keeps the global sigma constants)."""
+        ec = self.cfg.ensemble
+        if (not ec.wind_stats_enabled or raw_field is None
+                or source != PredictionSource.MEASURED or profile.is_empty()):
+            return None
+        from .profile import wind_residual_stats
+        return wind_residual_stats(profile, raw_field, t0_epoch=flight.last_t,
+                                   min_bins=ec.wind_stats_min_bins)
 
     def _ensemble_on(self, n_members: int) -> bool:
         return self.cfg.ensemble.enabled and n_members >= 2
